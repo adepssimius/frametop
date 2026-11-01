@@ -12,8 +12,15 @@ which window floats on which spare output and panel, and connects three parts:
 Commands and ft-screens' events arrive as datagrams on @frametop_float (ft-float is the
 command-line side). Replies go to the sender:
   float [ID|active|pointer]   dock [ID|active|all]   close ID   list   quit   (ft-float)
-  launch APP.desktop   run ["argv", ...]   (start an app and float its first window)
+  launch APP.desktop [action=ACTION] [screen=N]   run ["argv", ...]
+            (start an app, or one of its desktop file's actions, and float its first window;
+            with screen=N its first window opens docked on screen N instead)
+  dashlaunch CMDLINE   (ft-dashroute: an app picked in the SteamVR dashboard's Launch a program
+            list, Steam's command line for it: launch it floating -> "ok", or "steamvr REASON"
+            when it should be SteamVR's own window after all; see dash_launch)
   windows   (-> JSON: the open apps' windows and where they are, for a profile; ft-layout save)
+  spotlist  (-> JSON: every app window, its title, panel, and when it was last active; frunner)
+  activate ID   (make that window KWin's active one, unminimized; frunner)
   profile NAME   (open a profile's apps: move the matching windows, launch the missing ones)
   ("float pointer" is the float key: the window under the pointer, else the active one,
   floated or docked; the input relay sends it for float_toggle, and "dock all" for dock_all)
@@ -24,15 +31,15 @@ command-line side). Replies go to the sender:
 Spare outputs are WL-<screens> .. WL-<screens + slots - 1>. A floating window's output is its
 frame plus a margin on each side (FLOAT_MARGIN pixels), so menus have room; the panel shows
 only the window. Spares are placed apart from the screens and from each other in KWin's
-layout, all within Xwayland's 32767-pixel limit.
+layout, within Xwayland's 32767-pixel limit at scales up to 1.6.
 
 Usage: ft-floatd [--screens N] [--slots N] [--margin PX] [--control NAME] [--socket NAME]
 Defaults: FT_SCREEN_COUNT (from the session) or the layout's count, FLOAT_SLOTS and
 FLOAT_MARGIN from ~/.config/frametop.conf (8 and 300), @ft_screens, @frametop_float.
 
 Launching floating: "launch" starts a desktop file's app (Gio), "run" a command. The next
-normal window from that process (or a child), or with that desktop file name, within
-LAUNCH_SECONDS floats: where that app last floated, or in front of you. Single-instance and
+normal window from that process (or a child), or of that desktop file (desktop_name: by its app
+id, else its class, so Flatpak and X11 apps match too), within LAUNCH_SECONDS floats: where that app last floated, or in front of you. Single-instance and
 D-Bus-activated apps open their window from a process that was already running, hence the
 name. Each app's last floating place (its pose relative to the primary screen, so it moves
 with the screens' layout), size in pixels, and scale are kept in PLACES_PATH, by desktop
@@ -54,6 +61,8 @@ import json
 import math
 import os
 import re
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -73,13 +82,23 @@ SERVICE = IFACE = "org.frametop.Float"
 PATH = "/Float"
 SCRIPT = "frametop-float"
 POLL_SECONDS = 20        # NextCommand answers empty after this (KWin's D-Bus timeout is 25 s)
-SPARE_X, SPARE_CELL = 12000, 5000  # spares in KWin's layout: a grid from here, 4 across
+# Spares in KWin's layout: a grid 4 across, below the screens. X11 windows get Xwayland
+# coordinates of the layout's times its largest scale, which wrap past 32767: a window there
+# takes no clicks. 16 spares end at 20000, fine up to scale 1.6 (12000 across had the 4th
+# column past it at 1.25).
+SPARE_Y, SPARE_CELL = 4000, 4000
 PULL_OUT = 0.3           # a floated window starts this far in front of its screen (metres), clear of it
 DEFAULT_MPP = 1.6 / 1920  # metres per pixel when ft-screens can't say (no SteamVR)
 PLACES_PATH = os.path.expanduser("~/.config/frametop-float.json")  # each app's last floating place
 LAUNCH_SECONDS = 30      # a launched app's window must show up within this
 IN_FRONT = 2.0           # at most this far in front of you, for an app with no remembered place
 DEBUG = os.environ.get("FT_FLOAT_DEBUG") == "1"  # log every event from the script
+# The SteamVR dashboard's Launch a program list (float/ft-dashroute): these stay SteamVR's, since
+# they aren't apps with a window for the desktop: Steam, SteamVR, the desktops themselves, and
+# Frametop's layout commands (a profile's entry, Reset Screen Layout, Hide/Show Screens).
+STEAMVR_ONLY = {"steam", "vrurlhandler", "steamos-nested-desktop", "frametop-session.sh", "ft-layout",
+                "ft-layout-reset", "ft-hide-show"}
+PAUSE_PATH = f"/run/user/{os.getuid()}/frametop-pause.json"  # input/game_pause.py's state
 
 
 def whole(*scales):
@@ -223,6 +242,45 @@ def recordable(ev):
     return app not in SKIP_APPS and not any(n.startswith(("ft-", "frametop", "ksplash")) for n in (app, cls))
 
 
+def listable(ev):
+    """An app's top-level window, the kind frunner finds: Frametop's own settings apps too,
+    which profiles leave out (an open Input Settings launched a second copy, 2026-10-13)."""
+    if not ev.get("normal") or ev.get("popup") or ev.get("transient"):
+        return False
+    return ev.get("app", "") not in SKIP_APPS and not any(n.startswith("ksplash") for n in (ev.get("app", ""), ev.get("cls", "")))
+
+
+def exec_argv(info):
+    """A desktop file's command, without its field codes (%U and the like), as Steam lists it."""
+    try:
+        argv = shlex.split(info.get_commandline() or "")
+    except ValueError:
+        return []
+    return [a for a in argv if not re.fullmatch(r"%[a-zA-Z]", a)]
+
+
+def app_of(argv):
+    """The desktop file (its name, without .desktop) whose command is argv, or None. Steam's
+    command line for an app is its Exec line without the field codes, each argument quoted."""
+    if not argv:
+        return None
+    want = [shutil.which(argv[0]) or argv[0]] + argv[1:]
+    for info in sorted(Gio.AppInfo.get_all(), key=lambda i: not i.should_show()):  # menu entries first
+        got = exec_argv(info)
+        if got and [shutil.which(got[0]) or got[0]] + got[1:] == want:
+            return info.get_id().removesuffix(".desktop")
+    return None
+
+
+def paused():
+    """Frametop is paused for a VR game: its windows don't show."""
+    try:
+        with open(PAUSE_PATH) as f:
+            return json.load(f).get("paused") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def cmdline(pid):
     try:
         with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
@@ -231,22 +289,56 @@ def cmdline(pid):
         return []
 
 
+_names = {}  # (app, cls) -> (desktop file name, when): desktop_name's answers for a minute
+
+
 def desktop_name(app, cls):
-    """The desktop file name for a window's app id and class. A Flatpak app's window can give an
-    id with no desktop file: RustDesk's (an X11 window) says com.carriez.flutter_hbb, and its
-    desktop file is com.rustdesk.RustDesk. That file's StartupWMClass names the window's class
-    then. The app id itself when nothing matches."""
+    now = time.monotonic()
+    hit = _names.get((app, cls))
+    if hit and now - hit[1] < 60:
+        return hit[0]
+    if len(_names) > 512:
+        _names.clear()
+    name = _desktop_name(app, cls)
+    _names[(app, cls)] = (name, now)
+    return name
+
+
+def _desktop_name(app, cls):
+    """The desktop file name (without .desktop) for a window's app id and class, or "" when no
+    desktop file is its. Most windows give their desktop file name as the app id. The others:
+    - A Flatpak app's window can give an id with no desktop file: RustDesk's (an X11 window)
+      says com.carriez.flutter_hbb, and its desktop file is com.rustdesk.RustDesk.
+    - An X11 window can give no app id at all, only its class: Brave's Flatpak says
+      "Brave-browser" (2026-10-13), and its desktop file is com.brave.Browser.
+    Then, by the class (or the id), in this order: a desktop file's StartupWMClass; a desktop
+    file whose name, or its last dotted part, is that name; the program a desktop file runs
+    (Flatpak's --command=, else the Exec's own), by its name."""
     try:
-        if not app or Gio.DesktopAppInfo.new(app + ".desktop"):
+        if app and Gio.DesktopAppInfo.new(app + ".desktop"):
             return app
     except TypeError:  # PyGObject raises for the NULL a missing desktop file returns
         pass
     names = {n.lower() for n in (app, cls) if n}
-    for info in Gio.AppInfo.get_all():
-        wm = info.get_startup_wm_class() if isinstance(info, Gio.DesktopAppInfo) else None
+    if not names:
+        return ""
+    infos = [i for i in Gio.AppInfo.get_all() if isinstance(i, Gio.DesktopAppInfo) and i.get_id()]
+    for info in infos:
+        wm = info.get_startup_wm_class()
         if wm and wm.lower() in names:
             return info.get_id().removesuffix(".desktop")
-    return app
+    for info in infos:
+        did = info.get_id().removesuffix(".desktop").lower()
+        if did in names or did.rsplit(".", 1)[-1] in names:
+            return info.get_id().removesuffix(".desktop")
+    for info in infos:
+        line = info.get_commandline() or ""
+        m = re.search(r"--command=(\S+)", line)
+        prog = os.path.basename(m.group(1) if m else (info.get_executable() or ""))
+        if prog and prog.lower() not in ("flatpak", "env", "sh", "bash", "python3", "snap") and \
+                any(n == prog.lower() or n.startswith(prog.lower() + "-") for n in names):
+            return info.get_id().removesuffix(".desktop")
+    return ""
 
 
 class Launch:
@@ -259,6 +351,7 @@ class Launch:
         self.pids = [pid] if pid else []  # the processes we started (none when D-Bus started it)
         self.entries = entries    # a profile's entries still waiting for a window, or None
         self.relaunched = False
+        self.dock = None          # its first window opens docked on this output (launch screen=N)
         self.until = time.monotonic() + LAUNCH_SECONDS
 
 
@@ -287,7 +380,7 @@ class Slot:
         self.k = k
         self.output = f"WL-{screens + k}"
         self.index = screens + k + 1  # ft-screens' number (1-based)
-        self.pos = (SPARE_X + (k % 4) * SPARE_CELL, (k // 4) * SPARE_CELL)
+        self.pos = ((k % 4) * SPARE_CELL, SPARE_Y + (k // 4) * SPARE_CELL)
         self.size = None              # its output's size in pixels, as last set
         self.want = None              # the size in pixels asked for (size is at least that)
         self.kscale = 1.0             # its output's scale in KWin, as last set
@@ -308,7 +401,7 @@ class Daemon:
         self.sub_numbers = {}    # popup/dialog id -> (window id, number)
         self.next_sub = 1
         self.launches = []       # Launch: apps we started, waiting for their window
-        self.captures = {}       # token -> sender: "windows" requests waiting for the script's report
+        self.captures = {}       # token -> (sender, what): "windows" and "spotlist" requests waiting for the script's report
         self.next_token = 1
         self.sock = None         # our socket (set by main), for deferred replies
         self.places = load_places()  # app -> {"rel": pose by the primary screen, "pixels", "scale"}
@@ -394,6 +487,11 @@ class Daemon:
             return
         if kind == "added" and self.launches and not f:
             launch = self.launched(ev)
+            if launch and launch.dock:
+                log(f"{wid[:9]} ({ev.get('cls')}) opens docked on {launch.dock}")
+                self.command(cmd="to-output", id=wid, output=launch.dock)
+                self.seen(ev)
+                return
             if launch and launch.entries is None:
                 self.float_launched(ev, launch)
                 return
@@ -469,7 +567,7 @@ class Daemon:
                 return
             # Floating when ft-floatd (re)started: take it over where it is.
             f = Float(wid, slot, None)
-            f.app = ev.get("app", "")
+            f.app = desktop_name(ev.get("app", ""), ev.get("cls", "")) or ev.get("app", "")
             slot.window = f
             self.floats[wid] = f
             f.scale = slot.kscale = output_scales().get(slot.output, 1.0)
@@ -557,7 +655,7 @@ class Daemon:
                         "to float another.")
             return None
         f = Float(wid, slot, {"output": ev["output"], "frame": ev["frame"], "onAllDesktops": ev.get("onAllDesktops")})
-        f.app = ev.get("app", "")
+        f.app = desktop_name(ev.get("app", ""), ev.get("cls", "")) or ev.get("app", "")
         slot.window = f
         self.floats[wid] = f
         scales = output_scales()
@@ -760,9 +858,11 @@ class Daemon:
         c[1] -= 0.1 * d  # a little below eye level, like a screen
         return c, ft_layout.turn_yaw((1.0, 0.0, 0.0), heading), (0.0, 1.0, 0.0), ft_layout.turn_yaw((0.0, 0.0, 1.0), heading)
 
-    def launch(self, app=None, argv=None):
-        """Start an app (a desktop file name) or a command; its first window will float.
-        Returns (reply, pid or None)."""
+    def launch(self, app=None, argv=None, action=None, dock=None):
+        """Start an app (a desktop file name) or a command; its first window will float, or
+        with dock (an output name) open docked there. action: one of the desktop file's
+        actions instead (no pid: its window is known by the app's name). Returns (reply, pid or
+        None)."""
         if app:
             app = app.removesuffix(".desktop")
             try:
@@ -771,14 +871,22 @@ class Daemon:
                 info = None
             if info is None:
                 return f"error no app {app}", None
+            if action and action not in info.list_actions():
+                return f"error {app} has no action {action}", None
             pids = []
             try:
-                info.launch_uris_as_manager([], Gio.AppLaunchContext(), GLib.SpawnFlags.SEARCH_PATH,
-                                            None, None, lambda _info, pid, *_: pids.append(pid), None)
+                if action:
+                    info.launch_action(action, Gio.AppLaunchContext())
+                else:
+                    info.launch_uris_as_manager([], Gio.AppLaunchContext(), GLib.SpawnFlags.SEARCH_PATH,
+                                                None, None, lambda _info, pid, *_: pids.append(pid), None)
             except GLib.Error as e:
                 return f"error {app}: {e.message}", None
-            self.launches.append(Launch(app, pids[0] if pids else None))
-            log(f"launched {app} (pid {pids[0] if pids else 'by D-Bus'})")
+            la = Launch(app, pids[0] if pids else None)
+            la.dock = dock
+            self.launches.append(la)
+            log(f"launched {app}{' (' + action + ')' if action else ''}"
+                f"{' docked on ' + dock if dock else ''} (pid {pids[0] if pids else 'by D-Bus'})")
             return "ok", (pids[0] if pids else None)
         else:
             try:
@@ -798,15 +906,49 @@ class Daemon:
         if not ev.get("normal") or ev.get("popup") or ev.get("transient"):
             return None
         chain = pid_chain(int(ev.get("pid") or 0))
-        app = ev.get("app", "")
-        # (An X11 window in a Flatpak gives its pid in the sandbox: only its app id can match.)
-        apps = {app, desktop_name(app, ev.get("cls", ""))} if app and any(la.app for la in self.launches) else {app}
+        # A window in a sandbox (Flatpak, Snap) gives its pid in there, and a single-instance app
+        # opens it from a process that was already running: then only its desktop file can match.
+        name = desktop_name(ev.get("app", ""), ev.get("cls", "")) if any(la.app for la in self.launches) else ""
         for la in self.launches:
-            if any(p in chain for p in la.pids) or (la.app and app and la.app in apps):
-                if not la.entries or len(la.entries) <= 1:
-                    self.launches.remove(la)
-                return la
+            if any(p in chain for p in la.pids) or (la.app and name == la.app):
+                return self.took(la)
+        # Last: a window no desktop file claims, while exactly one app launch waits and none of
+        # its processes made it (an app whose window names itself after nothing we can find).
+        waiting = [la for la in self.launches if la.app]
+        if not name and len(waiting) == 1 and not any(p in chain for la in self.launches for p in la.pids):
+            log(f"{ev.get('id', '')[:9]} ({ev.get('cls', '') or '?'}): no desktop file claims it; "
+                f"taken as {waiting[0].app}'s, the one launch waiting")
+            return self.took(waiting[0])
         return None
+
+    def dash_launch(self, text):
+        """An app picked in the SteamVR dashboard's Launch a program list (ft-dashroute):
+        launch it with its first window floating -> "ok". Or "steamvr REASON": SteamVR
+        opens it as its own window after all."""
+        if ft_layout.read_conf().get("DASHBOARD_APPS", "steamvr") != "frametop":
+            return "steamvr the setting is off"
+        try:
+            argv = shlex.split(text)
+        except ValueError:
+            argv = []
+        if not argv:
+            return "steamvr no command"
+        if os.path.basename(argv[0]) in STEAMVR_ONLY:
+            return f"steamvr {os.path.basename(argv[0])} is SteamVR's"
+        if paused():
+            return "steamvr Frametop is paused"
+        now = time.monotonic()
+        waiting = sum(1 for la in self.launches if la.dock is None and la.until > now)
+        if sum(1 for s in self.slots if s.window is None) - waiting <= 0:
+            return f"steamvr all {len(self.slots)} floating windows are in use"
+        app = app_of(argv)
+        reply = self.launch(app=app)[0] if app else self.launch(argv=argv)[0]
+        return "ok" if reply == "ok" else f"steamvr {reply}"
+
+    def took(self, la):
+        if not la.entries or len(la.entries) <= 1:
+            self.launches.remove(la)
+        return la
 
     def concealed(self):
         """The screens (1-based) hidden on their own (ft-layout hide N)."""
@@ -825,7 +967,7 @@ class Daemon:
     def float_launched(self, ev, launch):
         """Float a launched app's window (or one that opened on a hidden screen) where that app
         last floated (its size too), or in front of you, at the primary screen's density."""
-        app = ev.get("app") or (launch.app if launch else "")
+        app = (launch.app if launch and launch.app else "") or desktop_name(ev.get("app", ""), ev.get("cls", "")) or ev.get("app", "")
         known = self.places.get(app) if app else None
         ref = self.reference()
         place = to_world(ref, known["rel"]) if known and ref and len(known.get("rel", [])) == 12 else self.in_front()
@@ -838,25 +980,42 @@ class Daemon:
 
     # ------------------------------------------------------------ profiles (docs/profiles.md)
 
-    def capture(self, sender):
-        """"windows": have the script report every window as it is now, and answer when the
-        report is in (or after 3 seconds with what we know)."""
+    def capture(self, sender, what="windows"):
+        """"windows" and "spotlist": have the script report every window as it is now, and
+        answer when the report is in (or after 3 seconds with what we know)."""
         if not sender:
-            return "error windows needs a reply address"
+            return f"error {what} needs a reply address"
         token = self.next_token
         self.next_token += 1
-        self.captures[token] = sender
+        self.captures[token] = (sender, what)
         self.command(cmd="report-all", token=token)
         GLib.timeout_add(3000, lambda: self.captured(token) and False)
         return None  # answered by captured
 
     def captured(self, token):
-        sender = self.captures.pop(token, None)
+        sender, what = self.captures.pop(token, (None, None))
         if sender and self.sock:
+            entries = self.spot_entries() if what == "spotlist" else self.window_entries()
             try:
-                self.sock.sendto(("ok " + json.dumps(self.window_entries())).encode(), sender)
+                self.sock.sendto(("ok " + json.dumps(entries)).encode(), sender)
             except OSError as e:
-                log(f"windows: {e}")
+                log(f"{what}: {e}")
+
+    def spot_entries(self):
+        """Every app window for frunner's search: its desktop file name, title, the panel
+        it's on (a screen or a floating window's; None elsewhere), and when it was last active."""
+        out = []
+        for wid, ev in self.windows.items():
+            if not listable(ev):
+                continue
+            f = self.floats.get(wid)
+            m = re.match(r"WL-(\d+)$", ev.get("output", ""))
+            panel = f.slot.index if f else (int(m.group(1)) + 1 if m and int(m.group(1)) < self.screens_n else None)
+            out.append({"id": wid, "app": desktop_name(ev.get("app", ""), ev.get("cls", "")),
+                        "class": ev.get("cls", ""), "pid": ev.get("pid") or 0, "title": ev.get("caption", ""),
+                        "panel": panel, "floating": bool(f), "minimized": bool(ev.get("minimized")),
+                        "activeAt": ev.get("activeAt") or 0})
+        return out
 
     def window_entries(self):
         """Every app window and where it is, as a profile keeps it."""
@@ -866,7 +1025,8 @@ class Daemon:
         for wid, ev in self.windows.items():
             if not recordable(ev):
                 continue
-            entry = {"app": desktop_name(ev["app"], ev.get("cls", ""))} if ev.get("app") else {"cmd": cmdline(ev.get("pid")), "class": ev.get("cls", "")}
+            app = desktop_name(ev.get("app", ""), ev.get("cls", ""))
+            entry = {"app": app} if app else {"cmd": cmdline(ev.get("pid")), "class": ev.get("cls", "")}
             if not entry.get("app") and not entry.get("cmd"):
                 continue
             f = self.floats.get(wid)
@@ -1036,8 +1196,15 @@ class Daemon:
         if not words:
             return "error empty"
         cmd, rest = words[0], words[1:]
-        if cmd == "launch" and len(rest) == 1:
-            return self.launch(app=rest[0])[0]
+        if cmd == "launch" and rest:
+            opts = dict(w.split("=", 1) for w in rest[1:] if "=" in w)
+            if len(opts) != len(rest) - 1 or set(opts) - {"action", "screen"}:
+                return "error launch APP.desktop [action=ACTION] [screen=N]"
+            screen = opts.get("screen")
+            if screen is not None and not (screen.isdigit() and 1 <= int(screen) <= self.screens_n):
+                return f"error no screen {screen}"
+            return self.launch(app=rest[0], action=opts.get("action"),
+                               dock=f"WL-{int(screen) - 1}" if screen else None)[0]
         if cmd == "run" and rest:
             try:
                 argv = json.loads(text.split(None, 1)[1])
@@ -1046,8 +1213,15 @@ class Daemon:
             if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
                 return "error run takes a JSON list"
             return self.launch(argv=argv)[0]
-        if cmd == "windows":
-            return self.capture(sender)
+        if cmd == "dashlaunch" and rest:
+            return self.dash_launch(text.split(None, 1)[1])
+        if cmd in ("windows", "spotlist"):
+            return self.capture(sender, cmd)
+        if cmd == "activate" and len(rest) == 1:
+            if rest[0] not in self.windows:
+                return f"error no window {rest[0]}"
+            self.command(cmd="activate", id=rest[0])
+            return "ok"
         if cmd == "profile" and rest:
             return self.open_profile(text.split(None, 1)[1])
         if cmd == "list":
@@ -1160,7 +1334,7 @@ def main():
     conf = ft_layout.read_conf()
     p = argparse.ArgumentParser(description="Floating windows for the Frametop desktop")
     p.add_argument("--screens", type=int, default=int(os.environ.get("FT_SCREEN_COUNT") or 0))
-    p.add_argument("--slots", type=int, default=int(conf.get("FLOAT_SLOTS") or 8))
+    p.add_argument("--slots", type=int, default=int(conf.get("FLOAT_SLOTS") or 16))
     p.add_argument("--margin", type=int, default=int(conf.get("FLOAT_MARGIN") or 300))
     p.add_argument("--control", default="ft_screens")
     p.add_argument("--socket", default="frametop_float")

@@ -574,7 +574,7 @@ Kirigami.ApplicationWindow {
                         Kirigami.FormData.label: "Rows:"
                         visible: lpage.layout.mode !== "custom"
                         from: 1
-                        to: Math.max(1, backend.screens)
+                        to: Math.max(1, backend.screenCount)
                         value: lpage.preset.rows || 1
                         onValueModified: backend.setPreset("rows", value)
                     }
@@ -868,15 +868,21 @@ Kirigami.ApplicationWindow {
 
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Screens shown" }
 
+                    // Counts as models, here and in Pinned screens: a new list rebuilds the rows, and
+                    // FormLayout puts rebuilt rows after the ones below (a report: pinning a screen
+                    // moved the wrist slider and All screens up between Screen 2 and Screen 3).
                     Repeater {
-                        model: backend.screensShown
+                        model: backend.screensShown.length
                         delegate: Controls.Switch {
-                            required property var modelData
+                            id: shownSwitch
                             required property int index
                             Kirigami.FormData.label: "Screen " + (index + 1) + ":"
-                            text: modelData ? "Shown" : "Hidden"
-                            checked: modelData
-                            onToggled: backend.setScreenShown(index, checked)
+                            text: checked ? "Shown" : "Hidden"
+                            checked: backend.screensShown[index]
+                            onToggled: {
+                                backend.setScreenShown(shownSwitch.index, checked)
+                                checked = Qt.binding(() => backend.screensShown[shownSwitch.index])
+                            }
                         }
                     }
                     Controls.Label {
@@ -890,10 +896,11 @@ Kirigami.ApplicationWindow {
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Pinned screens" }
 
                     Repeater {
-                        model: backend.pins
+                        model: backend.pins.length
                         delegate: Controls.ComboBox {
-                            required property var modelData
+                            id: pinBox
                             required property int index
+                            readonly property int pinIndex: Math.max(0, ["none", "left", "right", "head"].indexOf(backend.pins[index]))
                             Kirigami.FormData.label: "Screen " + (index + 1) + ":"
                             model: [
                                 { text: "In the room", value: "none" },
@@ -903,8 +910,13 @@ Kirigami.ApplicationWindow {
                             ]
                             textRole: "text"
                             valueRole: "value"
-                            currentIndex: Math.max(0, ["none", "left", "right", "head"].indexOf(modelData))
-                            onActivated: backend.pin(String(index + 1), currentValue)
+                            currentIndex: pinIndex
+                            // pinBox.index: activated's own argument is also called index (the
+                            // chosen row), so a bare index sent "On your head" to screen 4.
+                            onActivated: {
+                                backend.pin(String(pinBox.index + 1), currentValue)
+                                currentIndex = Qt.binding(() => pinBox.pinIndex)  // what ft-screens has, if the pin failed
+                            }
                         }
                     }
                     RowLayout {
@@ -957,6 +969,93 @@ Kirigami.ApplicationWindow {
                           + "is now, like a HUD, and shows whenever the screens do. Grab its bar to move it; it stays on "
                           + "your head where you let go. Choosing a pin above keeps the screen where it is now, so place "
                           + "it first. Save as profile… (Layout) keeps pins."
+                }
+
+                Kirigami.FormLayout {
+                    Layout.fillWidth: true
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Notifications" }
+
+                    Repeater {
+                        model: [
+                            { value: "auto", text: "Show them in the Steam session", help: "The desktop's notifications go to the Steam session's notification server, such as one that shows them in VR, with their buttons. Plasma's own popups stay off meanwhile; its history keeps them. Not to SteamOS's own server, which can't show them on the Frame." },
+                            { value: "on", text: "Always send them to the Steam session", help: "Whatever serves notifications there, SteamOS's own server too, which can't show them on the Frame: they're lost then." },
+                            { value: "off", text: "Keep them in the desktop", help: "Plasma shows them on the desktop's screens." }
+                        ]
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            spacing: 0
+                            // "on" can lose them (SteamOS's server): set in frametop.conf, shown only then
+                            visible: modelData.value !== "on" || backend.notifyForward === "on"
+                            Controls.RadioButton {
+                                text: modelData.text
+                                checked: backend.notifyForward === modelData.value
+                                onToggled: if (checked) backend.setNotifyForward(modelData.value)
+                            }
+                            Controls.Label {
+                                text: modelData.help
+                                opacity: 0.7
+                                font: Kirigami.Theme.smallFont
+                                leftPadding: Kirigami.Units.gridUnit * 1.6
+                                wrapMode: Text.Wrap
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        Kirigami.FormData.label: "Now:"
+                        visible: backend.desktopRunning
+                        text: backend.notifyForwardState === "forwarding" ? "In the Steam session"
+                            : backend.notifyForwardState === "waiting" ? "In the desktop: the Steam session has no notification server that can show them"
+                            : "In the desktop"
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    }
+                    RowLayout {
+                        visible: backend.notifyRestartNeeded
+                        Controls.Label {
+                            text: "Applies when the desktop starts again."
+                            wrapMode: Text.Wrap
+                        }
+                        Controls.Button {
+                            text: "Restart desktop"
+                            icon.name: "system-reboot"
+                            onClicked: restartDialog.open()
+                        }
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Apps from the SteamVR dashboard" }
+
+                    Repeater {
+                        model: [
+                            { value: "steamvr", text: "Open as SteamVR windows", help: "Apps picked in the dashboard's Launch a program list open as SteamVR's own windows, as without Frametop." },
+                            { value: "frametop", text: "Open as Frametop floating windows", help: "They open in the Frametop desktop instead, floating in front of you (where that app last floated), so drag and drop, the clipboard, frunner and profiles work with them. When the desktop isn't running, Frametop is paused, or all floating windows are in use, they open as SteamVR windows. Steam, SteamVR and Frametop's own layout entries always stay SteamVR's." }
+                        ]
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            spacing: 0
+                            Controls.RadioButton {
+                                text: modelData.text
+                                enabled: backend.floatSlots > 0
+                                checked: backend.dashboardApps === modelData.value
+                                onToggled: if (checked) backend.setDashboardApps(modelData.value)
+                            }
+                            Controls.Label {
+                                text: modelData.help
+                                opacity: 0.7
+                                font: Kirigami.Theme.smallFont
+                                leftPadding: Kirigami.Units.gridUnit * 1.6
+                                wrapMode: Text.Wrap
+                                Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                            }
+                        }
+                    }
+                    Controls.Label {
+                        visible: backend.floatSlots === 0
+                        text: "Floating windows are off (FLOAT_SLOTS=0 in ~/.config/frametop.conf), so these open in SteamVR."
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
+                    }
                 }
             }
         }
@@ -1033,6 +1132,31 @@ Kirigami.ApplicationWindow {
                                 ? "On, unused for " + (ppage.p.unused < 60 ? Math.floor(ppage.p.unused) + " s"
                                     : Math.floor(ppage.p.unused / 60) + " min " + Math.floor(ppage.p.unused % 60) + " s")
                                 : "On"
+                    }
+
+                    Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Startup" }
+
+                    Controls.Switch {
+                        Kirigami.FormData.label: "Frametop desktop:"
+                        text: "Start with SteamVR"
+                        checked: backend.autostart
+                        enabled: backend.autostartInstalled || backend.autostart
+                        onToggled: {
+                            backend.setAutostart(checked)
+                            checked = Qt.binding(() => backend.autostart)
+                        }
+                    }
+                    Controls.Label {
+                        text: backend.autostartInstalled
+                              ? "The desktop starts by itself whenever SteamVR starts. The Frame starts SteamVR when it "
+                                + "boots, so this includes boot, and it brings the desktop back after a SteamVR restart. "
+                                + "Closing the desktop keeps it closed until SteamVR starts again."
+                              : "The service that does this (frametop-autostart) isn't installed: run ./install.sh again, "
+                                + "or desktops.sh install."
+                        opacity: 0.7
+                        font: Kirigami.Theme.smallFont
+                        wrapMode: Text.Wrap
+                        Layout.maximumWidth: Kirigami.Units.gridUnit * 26
                     }
 
                     Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: "Sleep" }

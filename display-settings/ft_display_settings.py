@@ -10,8 +10,11 @@ the dev container:
     1920x1080 worth of pixels, rotation for portrait.)
   - Visibility (ft-screens): when the screens show (always, only with the SteamVR
     dashboard open, while you look at a controller, or only when toggled), the wrist
-    angle within which a pinned screen shows, and pinning each screen to a wrist or
-    your head.
+    angle within which a pinned screen shows, pinning each screen to a wrist or your
+    head, whether the desktop's notifications go to the Steam session
+    (NOTIFY_FORWARD, session/ft-notifyfwd; its state from its log), and whether apps from
+    the SteamVR dashboard's Launch a program list open as floating windows (DASHBOARD_APPS,
+    float/ft-dashroute).
   - Layout: a preset (curved or flat, rows, distance, gap, height) or a named layout
     saved from where the screens are, with a preview; arrange now; save the current
     arrangement under a name; rename and delete; arrange automatically when the
@@ -20,8 +23,9 @@ the dev container:
     Remote Displays (remote-displays/); a button opens it.
   - Power: how long the headset can go unused before ft-powerd turns its displays off
     (DISPLAY_OFF_MIN; the service's state comes from its control socket, @ft_powerd),
-    and whether the Frame stays awake while plugged in, which is Steam's own setting
-    (steam_settings.py; the value from before is kept as STEAM_SLEEP_AC_BEFORE).
+    whether the Frame stays awake while plugged in, which is Steam's own setting
+    (steam_settings.py; the value from before is kept as STEAM_SLEEP_AC_BEFORE), and whether
+    the desktop starts with SteamVR (AUTOSTART, session/autostart.sh).
 Settings go to ~/.config/frametop.conf and ~/.config/frametop-layout.json. Anything
 that touches SteamVR runs layout/ft-layout on the host.
 Launch with display-settings/ft-display-settings (host wrapper).
@@ -69,6 +73,10 @@ FT_POWERD = "\0ft_powerd"
 # nothing was saved.
 STEAM_SLEEP_AC_DEFAULT = 3600
 SCALES = [0.75, 1.0, 1.25, 4 / 3, 1.5, 1.75, 2.0]
+NOTIFY_FORWARD = ("auto", "on", "off")  # session/ft-notifyfwd; frametop.conf's NOTIFY_FORWARD
+DASHBOARD_APPS = ("steamvr", "frametop")  # float/ft-dashroute; frametop.conf's DASHBOARD_APPS
+NOTIFYFWD_LOG = "/tmp/frametop-notifyfwd.log"  # its last line is its state (/tmp is the host's)
+AUTOSTART_UNIT = os.path.expanduser("~/.config/systemd/user/frametop-autostart.service")
 ROTATIONS = [("normal", "Landscape"), ("left", "Portrait"), ("right", "Portrait (flipped)")]
 
 
@@ -128,6 +136,7 @@ class Backend(QObject):
         self._steam_busy = False
         self._steamDone.connect(self._steam_done, Qt.QueuedConnection)
         self._pins = []     # each running screen's pin: none | left | right | head
+        self._notify_state = ""
         self.poll = QTimer(interval=3000, timeout=self._check_running)
         self.poll.start()
         self._check_running()
@@ -148,8 +157,14 @@ class Backend(QObject):
                 return cast(conf.get(key, default))
             except ValueError:
                 return default
-        return {"screens": num("SCREENS", 2, int), "width": num("WIDTH", 1920, int),
-                "height": num("HEIGHT", 1080, int), "physWidth": num("PHYS_WIDTH", 1.6)}
+        notify = conf.get("NOTIFY_FORWARD", "auto")
+        dash = conf.get("DASHBOARD_APPS", "steamvr")
+        floats = num("FLOAT_SLOTS", 16, int)
+        return {"dashboardApps": dash if dash in DASHBOARD_APPS else "steamvr", "floatSlots": floats,
+                "screens": num("SCREENS", 2, int), "width": num("WIDTH", 1920, int),
+                "height": num("HEIGHT", 1080, int), "physWidth": num("PHYS_WIDTH", 1.6),
+                "notifyForward": notify if notify in NOTIFY_FORWARD else "off",
+                "autostart": conf.get("AUTOSTART", "0") == "1"}
 
     def _check_running(self):
         # The session's own Wayland socket (host processes' environments aren't readable
@@ -161,12 +176,15 @@ class Backend(QObject):
             running = os.path.exists(f"/run/user/{uid}/frametop/wayland-0")
         count = self._screens_running() if running and ft_layout.backend() == "screens" else 0
         pins = self._read_pins(count)
-        if running != self._running or count != self._running_count or pins != self._pins:
+        notify_state = self._read_notify_state() if running else ""
+        if (running != self._running or count != self._running_count or pins != self._pins
+                or notify_state != self._notify_state):
             if running != self._running or count != self._running_count:
                 self._started = self._conf() if running else {}
             self._running = running
             self._running_count = count
             self._pins = pins
+            self._notify_state = notify_state
             self.changed.emit()
         self._check_powerd()
 
@@ -258,6 +276,21 @@ class Backend(QObject):
             if route.get("signature"):
                 env["HYPRLAND_INSTANCE_SIGNATURE"] = route["signature"]
             subprocess.run(["hyprctl", "eval", expr], check=False, env=env, timeout=3)
+    @staticmethod
+    def _read_notify_state():
+        """ft-notifyfwd's: forwarding | waiting (no usable server on the user bus) | "" (not running)."""
+        try:
+            with open(NOTIFYFWD_LOG) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return ""
+        # the last state line: errors it logs in between (a failed Notify) don't change it
+        for line in reversed(lines):
+            if line == "ft-notifyfwd: forwarding":
+                return "forwarding"
+            if line.startswith("ft-notifyfwd: not forwarding"):
+                return "waiting"
+        return ""
 
     def _ask_screens(self, text):
         """Request/reply to ft-screens; None if it isn't running."""
@@ -303,6 +336,11 @@ class Backend(QObject):
     @Property(int, notify=changed)
     def screens(self):
         return self._conf()["screens"]
+
+    @Property(int, notify=changed)
+    def screenCount(self):
+        """The desktop's screens: the layout's with ft-screens, SCREENS with gamescope."""
+        return ft_layout.screen_count(ft_layout.load_layout())
 
     @Property(int, notify=changed)
     def width(self):
@@ -386,7 +424,8 @@ class Backend(QObject):
         if "panel_size" not in layout or layout["panel_size"] == list(ft_layout.DEFAULT_PANEL):
             layout["panel_size"] = [ft_layout.DEFAULT_PANEL[0], ft_layout.DEFAULT_PANEL[0] * c["height"] / c["width"]]
         out = []
-        for i, t in enumerate(ft_layout.plan(layout, c["screens"])):
+        # ft-screens: the layout's screens; SCREENS in frametop.conf is gamescope's count.
+        for i, t in enumerate(ft_layout.plan(layout, ft_layout.screen_count(layout))):
             w, h = ft_layout.screen_size(layout, i)
             out.append({"index": i, "x": t["pos"][0], "y": t["pos"][1], "z": t["pos"][2],
                         "faceYaw": t["face"][0], "facePitch": t["face"][1], "width": w, "height": h})
@@ -590,6 +629,58 @@ class Backend(QObject):
     @Slot()
     def toggleScreens(self):
         self._ask_screens("toggle")
+
+    # --- the desktop's notifications in the Steam session (session/ft-notifyfwd) ---
+    @Property(str, notify=changed)
+    def notifyForward(self):
+        return self._conf()["notifyForward"]
+
+    @Property(str, notify=changed)
+    def notifyForwardState(self):
+        return self._notify_state
+
+    @Property(bool, notify=changed)
+    def notifyRestartNeeded(self):
+        """The session writes ft-notifyfwd's autostart entry when it starts."""
+        return self._running and bool(self._started) and self._started["notifyForward"] != self._conf()["notifyForward"]
+
+    @Slot(str)
+    def setNotifyForward(self, mode):
+        if mode in NOTIFY_FORWARD:
+            write_conf_value("NOTIFY_FORWARD", mode)
+            self.changed.emit()
+
+    # --- Start with SteamVR (session/autostart.sh, frametop-autostart.service) ---
+    @Property(bool, notify=changed)
+    def autostart(self):
+        return self._conf()["autostart"]
+
+    @Property(bool, notify=changed)
+    def autostartInstalled(self):
+        """desktops.sh install writes the unit; the home folder is the same in the container."""
+        return os.path.exists(AUTOSTART_UNIT)
+
+    @Slot(bool)
+    def setAutostart(self, on):
+        """The unit reads AUTOSTART each time SteamVR starts: nothing to enable or restart."""
+        write_conf_value("AUTOSTART", "1" if on else "0")
+        self.changed.emit()
+
+    # --- apps from the SteamVR dashboard's Launch a program list (float/ft-dashroute) ---
+    @Property(str, notify=changed)
+    def dashboardApps(self):
+        return self._conf()["dashboardApps"]
+
+    @Property(int, notify=changed)
+    def floatSlots(self):
+        return max(0, min(16, self._conf()["floatSlots"]))
+
+    @Slot(str)
+    def setDashboardApps(self, mode):
+        """ft-dashroute and ft-floatd read it as they go: no restart."""
+        if mode in DASHBOARD_APPS:
+            write_conf_value("DASHBOARD_APPS", mode)
+            self.changed.emit()
 
     # --- ft-screens: visibility and pinning ---
     @Property("QVariantMap", notify=changed)

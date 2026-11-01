@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # Install everything on the Steam Frame: the build container, Frametop (multi-screen
-# desktop, input relay, universal 3D mouse, settings app), and optionally gaze mode, our own
-# eye tracker for it, and the Bluetooth fixes. Run it on the headset in a terminal, from this repo. It's safe to re-run,
-# for example after `git pull`. (Hand tracking, hands/, is deferred: it isn't offered here.)
+# desktop, input relay, universal 3D mouse, settings app), and optionally voice dictation,
+# hand tracking, gaze mode, our own eye tracker for it, and the Bluetooth fixes. Run it on the
+# headset in a terminal, from this repo. It's safe to re-run, for example after `git pull`.
 # (It also works from a PC over SSH; see "Developing from a PC" in the README.)
 # In a release (pack/install-release.sh), the programs come built from its image: this installs the
 # distrobox the release brings, makes the release's container from its image, and builds nothing.
 #
-# Usage: ./install.sh [--yes] [--no-eye-tracker] [--no-bluetooth | --bluetooth]
-#   --yes           don't ask; installs gaze mode, and our eye tracker if sudo can run without
-#                   a password prompt; skips the Bluetooth fixes and the SteamVR restart
-#   --no-eye-tracker  don't offer our own eye tracker
+# Usage: ./install.sh [--yes] [--no-voice] [--no-hands] [--no-hand-recorder] [--no-eye-tracker]
+#                    [--no-eye-recorder] [--no-bluetooth | --bluetooth]
+#   --yes           don't ask; installs voice dictation, gaze mode and the Eye Recorder, and hand
+#                   tracking, the Hand Recorder and our eye tracker if sudo can run without a
+#                   password prompt; skips the Bluetooth fixes and the SteamVR restart
+#   --no-voice      don't offer voice dictation (Frametop Voice: it downloads about 320 MB)
+#   --no-hands      don't offer hand tracking or the Hand Recorder
+#   --no-hand-recorder  don't offer the Hand Recorder (a release's; a clone builds it with
+#                   hands/rec/install.sh)
+#   --no-eye-tracker  don't offer our own eye tracker (or the Eye Recorder, which needs it)
+#   --no-eye-recorder  don't offer the Eye Recorder (a release's; a clone builds it with
+#                   gaze/rec/install.sh)
 #   --no-bluetooth  don't offer the Bluetooth fixes
 #   --bluetooth     install the Bluetooth fixes without asking (with --yes: if sudo can run
 #                   without a password prompt)
@@ -19,14 +27,18 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$root/scripts/_env.sh"
 
-assume_yes=0 bluetooth=1 eye_tracker=1
+assume_yes=0 bluetooth=1 eye_tracker=1 eye_recorder=1 hands=1 hand_recorder=1 voice=1
 for arg in "$@"; do
   case $arg in
     --yes) assume_yes=1 ;;
     --no-bluetooth) bluetooth=0 ;;
     --bluetooth) bluetooth=2 ;;
-    --no-eye-tracker) eye_tracker=0 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --no-eye-tracker) eye_tracker=0 eye_recorder=0 ;;
+    --no-eye-recorder) eye_recorder=0 ;;
+    --no-voice) voice=0 ;;
+    --no-hands) hands=0 hand_recorder=0 ;;
+    --no-hand-recorder) hand_recorder=0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -68,7 +80,7 @@ if [ "$FRAME_LOCAL" = 0 ] || [ -n "${SSH_CONNECTION:-}" ]; then
   echo "that need SteamVR start with it if it isn't running now."
 fi
 
-step "1/10 distrobox (container tool, installed in your home folder)"
+step "1/12 distrobox (container tool, installed in your home folder)"
 if on_frame 'test -x ~/.local/bin/distrobox'; then
   echo "already installed: $(on_frame '~/.local/bin/distrobox version | head -1')"
 elif [ "$FRAME_RELEASE" = 1 ]; then
@@ -82,41 +94,104 @@ cd ~/dev/src/distrobox && ./install --prefix ~/.local'
 fi
 
 if [ "$FRAME_RELEASE" = 1 ]; then
-  step "2/10 Frametop's container (from this release's image)"
+  step "2/12 Frametop's container (from this release's image)"
   "$root/pack/release-box.sh"
 else
-  step "2/10 build container (Fedora 44 'dev', about 1-2 GB the first time)"
+  step "2/12 build container (Fedora 44 'dev', about 1-2 GB the first time)"
   "$root/setup/dev-container.sh"
 fi
 
-step "3/10 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
+step "3/12 input relay (keeps Bluetooth mice working in SteamVR, device roles, button maps)"
 "$root/desktops.sh" relay install
 
-step "4/10 3D mouse: SteamVR driver"
+step "4/12 3D mouse: SteamVR driver"
 build "$root/pointer/driver/build.sh"
 "$root/pointer/driver/install.sh" install
 
-step "5/10 3D mouse: pointer helper service"
+step "5/12 3D mouse: pointer helper service, and the dashboard patch that lets it move SteamVR's windows"
 build "$root/pointer/helper/build.sh"
 "$root/pointer/helper/run.sh" install
+"$root/pointer/dashpatch/run.sh" install
 
-step "6/10 power service (turns the displays off while the headset isn't used, even on a stand)"
+step "6/12 power service (turns the displays off while the headset isn't used, even on a stand)"
 build "$root/power/build.sh"
 "$root/power/run.sh" install
 
-step "7/10 multi-screen desktop (ft-screens), Frametop Input Settings, Display Settings, and Remote Displays"
+step "7/12 multi-screen desktop (ft-screens), its keyboard (Full Keyboard), Frametop Input Settings, Display Settings, Remote Displays, and the Tour"
 build "$root/screens/build.sh"
 build "$root/stream/build.sh"  # ft-stream: remote displays (Frametop Remote Displays)
+build "$root/keyboard/build.sh"  # Frametop's keyboard: Full Keyboard, by TaiKeid (keyboard/FRAMETOP.md)
 "$root/desktops.sh" install >/dev/null
 "$root/input-settings/install.sh"
 "$root/display-settings/install.sh"
+"$root/tour/install.sh"
 "$root/remote-displays/install.sh"
 "$root/remote/install.sh"
+"$root/keyboard/run.sh" install
 on_frame "sed -i 's/^POINTER=0/POINTER=1/' ~/.config/frametop.conf; grep -q '^POINTER=' ~/.config/frametop.conf || echo 'POINTER=1' >> ~/.config/frametop.conf"
 echo "the launcher's Desktop entry now opens the multi-screen desktop; 3D mouse on (POINTER=1 in ~/.config/frametop.conf)"
 "$root/scripts/conf-migrate.sh"
 
-step "8/10 gaze mode (optional, experimental: the pointer goes where you look)"
+step "8/12 voice dictation (optional: speak, and it's typed where you type; nothing leaves the headset)"
+if [ "$voice" = 0 ]; then
+  echo "skipped (--no-voice). Install later with: voice/run.sh install"
+elif ask "Install voice dictation? A Right Ctrl tap or holding the left d-pad down starts it; it downloads about 320 MB of speech models." y; then
+  build "$root/voice/build.sh"
+  "$root/voice/run.sh" install ||
+    echo "voice dictation: not installed (above). Try again later with: voice/run.sh install"
+else
+  echo "skipped. Install later with: voice/run.sh install"
+fi
+
+# Hand tracking needs sudo once per build of ft-camd, its camera broker (file capabilities to
+# borrow XRService's camera buffers). Installed, it runs with the Frametop desktop
+# (HANDS_MODE=frametop), unless the settings already pick always.
+step "9/12 hand tracking (optional, experimental: your hands work the screens; it uses a lot of the headset's CPU)"
+if [ "$hands" = 0 ]; then
+  echo "skipped (--no-hands). Install later with: hands/run.sh install"
+elif [ "$assume_yes" = 1 ] && ! sudo_quiet; then
+  echo "skipped: it needs your password (sudo), and --yes doesn't ask. Install it later with: hands/run.sh install"
+elif ask "Install hand tracking? Poke, pinch and grab the screens with your hands. It runs while the Frametop desktop does (change that on the Hands page of Frametop Input Settings), and its camera broker needs your password (sudo)." y; then
+  if "$root/hands/run.sh" install; then
+    hands_caps=1
+    mode=$(on_frame "sed -n 's/^HANDS_MODE=\([a-z]*\).*/\1/p' ~/.config/frametop.conf | tail -1") || mode=
+    if [ "$mode" = always ]; then
+      echo "hand tracking runs whenever SteamVR does (HANDS_MODE=always, kept from your settings)"
+    else
+      if on_frame "python3 $(printf %q "$FRAME_REPO/hands/handsmode.py") set frametop" >/dev/null; then
+        echo "hand tracking runs while the Frametop desktop does (HANDS_MODE=frametop)"
+      else
+        echo "hand tracking is installed, but HANDS_MODE didn't change: choose With Frametop on the Hands page"
+      fi
+    fi
+  else
+    echo "hand tracking: not installed (above). Try again later with: hands/run.sh install"
+  fi
+else
+  echo "skipped. Install later with: hands/run.sh install"
+fi
+# The Hand Recorder (hands/rec): a release brings it built, so it's only ft-camd's capabilities
+# (set already if hand tracking just installed) and the menu entry. An entry from the release
+# before points into that release's folder, which goes two releases on: it's renewed without asking.
+# A clone builds it with hands/rec/install.sh (a few minutes), so it isn't offered here.
+if [ "$FRAME_RELEASE" = 1 ]; then
+  recorder="the Hand Recorder (records your hands for Frametop's open hand dataset)"
+  if [ "$hand_recorder" = 0 ]; then
+    echo "$recorder: skipped. Add it later with: hands/rec/install.sh"
+  elif on_frame '[ -e ~/.local/share/applications/frametop-handrec.desktop ]'; then
+    "$root/hands/rec/install.sh" install >/dev/null && echo "$recorder: updated" ||
+      echo "$recorder: couldn't update it (above). Try again with: hands/rec/install.sh"
+  elif [ "$assume_yes" = 1 ] && [ "${hands_caps:-0}" = 0 ] && ! sudo_quiet; then
+    echo "$recorder: skipped: it needs your password (sudo), and --yes doesn't ask. Add it later with: hands/rec/install.sh"
+  elif ask "Add the Hand Recorder to the app menu? It records your hands for Frametop's open hand dataset, which trains hand tracking; nothing leaves the headset until you press Upload. Its camera broker needs your password (sudo), as hand tracking does." y; then
+    "$root/hands/rec/install.sh" install ||
+      echo "$recorder: not installed (above). Try again later with: hands/rec/install.sh"
+  else
+    echo "$recorder: skipped. Add it later with: hands/rec/install.sh"
+  fi
+fi
+
+step "10/12 gaze mode (optional, experimental: the pointer goes where you look)"
 gaze=0
 if ask "Install gaze mode? You turn it on and calibrate it in Frametop Input Settings, on the Gaze page." y; then
   "$root/gaze/run.sh" install
@@ -127,7 +202,7 @@ fi
 
 # Ours is gaze mode's default once it's installed (GAZE_TRACKER=auto). Without it, gaze mode
 # uses SteamVR's eye tracker.
-step "9/10 our own eye tracker for gaze mode (recommended: more accurate than SteamVR's)"
+step "11/12 our own eye tracker for gaze mode (recommended: more accurate than SteamVR's)"
 if [ "$gaze" = 0 ]; then
   echo "skipped: gaze mode isn't installed. Install it later with: gaze/tracker/install.sh"
 elif [ "$eye_tracker" = 0 ]; then
@@ -155,7 +230,28 @@ else
   echo "skipped: gaze mode uses SteamVR's eye tracker. Install ours later with: gaze/tracker/install.sh"
 fi
 
-step "10/10 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
+# The Eye Recorder (gaze/rec), as the Hand Recorder: a release brings it built, so it's only the menu
+# entry, which needs our eye tracker's frame grabber (step 11). An entry from the release before
+# points into that release's folder: it's renewed without asking. A clone builds it with
+# gaze/rec/install.sh (a few minutes), so it isn't offered here.
+if [ "$FRAME_RELEASE" = 1 ]; then
+  recorder="the Eye Recorder (records your eyes for Frametop's eye tracking dataset)"
+  if [ "$eye_recorder" = 0 ]; then
+    echo "$recorder: skipped. Add it later with: gaze/rec/install.sh"
+  elif on_frame '[ -e ~/.local/share/applications/frametop-eyerec.desktop ]'; then
+    "$root/gaze/rec/install.sh" install >/dev/null && echo "$recorder: updated" ||
+      echo "$recorder: couldn't update it (above). Try again with: gaze/rec/install.sh"
+  elif ! on_frame 'systemctl is-enabled -q frametop-eyegrab.service 2>/dev/null'; then
+    echo "$recorder: skipped: it needs our eye tracker. Install both later with: gaze/tracker/install.sh, then gaze/rec/install.sh"
+  elif ask "Add the Eye Recorder to the app menu? It records your eyes for Frametop's eye tracking dataset, which trains our eye tracker; nothing leaves the headset until you press Upload, and uploads are encrypted." y; then
+    "$root/gaze/rec/install.sh" install ||
+      echo "$recorder: not installed (above). Try again later with: gaze/rec/install.sh"
+  else
+    echo "$recorder: skipped. Add it later with: gaze/rec/install.sh"
+  fi
+fi
+
+step "12/12 Bluetooth fixes (optional; they let LE mice and keyboards like the Swiftpoint Z3 reconnect)"
 if [ "$bluetooth" = 2 ] && [ "$assume_yes" = 1 ] && ! sudo_quiet; then
   echo "skipped: they need your password (sudo), and --yes doesn't ask. Install later with: setup/bluetooth/install.sh install"
 elif [ "$bluetooth" = 2 ] || { [ "$bluetooth" = 1 ] && ask "Install the Bluetooth fixes? They need your password (sudo)." n; }; then

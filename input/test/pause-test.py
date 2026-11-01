@@ -8,6 +8,7 @@ renamed, so nothing reaches the live Frametop, SteamVR, or the running relay.
 """
 import os
 import sys
+import shutil
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -51,7 +52,12 @@ check("sticks 0.5 s apart, twice: nothing", presses(g, both(0, gap=0.5, hold=0.6
 g = gp.Gesture((L, R), 2)
 check("three double presses in a row: once", presses(g, both(0) + both(0.3) + both(0.6)), 1)
 g = gp.Gesture((L, R), 2)
-check("again after a second: twice in all", presses(g, both(0) + both(0.3) + both(2.0) + both(2.3)), 2)
+check("again 2 s later (2026-10-16: resumed, then paused again): ignored",
+      presses(g, both(0) + both(0.3) + both(2.0) + both(2.3)), 1)
+check("...and says how long after the last one", round(g.ignored, 1), 2.0)
+g = gp.Gesture((L, R), 2)
+check("again after the cooldown: twice in all",
+      presses(g, both(0) + both(0.3) + both(gp.GESTURE_COOLDOWN + 0.5) + both(gp.GESTURE_COOLDOWN + 0.8)), 2)
 g = gp.Gesture((L, R), 2)
 check("repeated down states count once",
       presses(g, [(0, L, True), (0.01, L, True), (0.02, R, True), (0.03, R, True), (0.1, L, False), (0.1, R, False)]
@@ -63,6 +69,18 @@ check("one button double-clicked: goes off",
       presses(g, [(0, "right/b", True), (0.1, "right/b", False), (0.3, "right/b", True)]), 1)
 g = gp.Gesture(("right/b",), 2)
 check("other buttons don't count", presses(g, [(0, "right/a", True), (0.2, "right/a", True)]), 0)
+
+check("one controller: its stick alone", gp.one_controller((L, R), {"right"}), (R,))
+check("one controller (left): its stick alone", gp.one_controller((L, R), {"left"}), (L,))
+check("both controllers: the gesture as set", gp.one_controller((L, R), {"left", "right"}), None)
+check("no controllers: nothing", gp.one_controller((L, R), set()), None)
+check("two buttons on one controller: as set", gp.one_controller(("right/a", "right/b"), {"right"}), None)
+check("one button: as set", gp.one_controller(("right/b",), {"right"}), None)
+g = gp.Gesture(gp.one_controller((L, R), {"right"}), 2)
+check("one controller: its stick clicked twice goes off",
+      presses(g, [(0, R, True), (0.1, R, False), (0.3, R, True), (0.4, R, False)]), 1)
+g = gp.Gesture(gp.one_controller((L, R), {"right"}), 2)
+check("one controller: its stick clicked once, nothing", presses(g, [(0, R, True), (0.1, R, False)]), 0)
 
 VR = ("left/thumbstick", "right/thumbstick", "right/b", "right/a")
 check("no pause_gesture: both sticks twice", gp.gesture_of({}, VR), ((L, R), 2))
@@ -115,10 +133,19 @@ class StubWatch:
     def set_gesture(self, spec):
         self.spec = spec
 
+    def set_touch_feed(self, on):
+        self.touch = on
+
+    def helper_started(self):
+        pass
+
 
 tmp = tempfile.mkdtemp(prefix="ft-pause-test-")
 gp.STATE_PATH = os.path.join(tmp, "pause.json")
 gp.SCREENS = f"\0ft_pause_test_{os.getpid()}_screens"
+gp.HELPER = f"\0ft_pause_test_{os.getpid()}_helper"  # "paused 1|0" mustn't reach the live pointer helper
+os.makedirs(os.path.join(tmp, "frametop-hands"))
+gp.PARK_PATH = os.path.join(tmp, "frametop-hands", "park")
 gp.Worker, gp.ControllerWatch = StubWorker, StubWatch
 changes = []
 
@@ -198,6 +225,50 @@ p.toggle("gesture", 0)
 q = gp.GamePause(lambda *a: None, changes.append, VR)
 check("a relay restarted while paused stays paused", (q.paused, q.reason), (True, "gesture"))
 check("and stops the services again", q.worker.jobs, ["enforce"])
+told = []
+q.tell_screens = told.append
+q.screens_seen(4242)
+check("the desktop that reports in first hears the pause (2026-10-16: it showed, the pointer was off)",
+      told, [True])
+q.screens_seen(4242)
+check("...once, not every second", told, [True])
+q.screens_seen(None)
+check("a sender without credentials changes nothing", told, [True])
+q.screens_seen(4343)
+check("a restarted desktop (new pid) hears it again", told, [True, True])
+p.tell_screens = told.append
+told.clear()
+p.toggle("gesture", 1)
+p.screens_seen(5151)
+check("running: a new desktop hears nothing", told, [False])
+
+# ---------------------------------------------------------------- hand tracking parked for games
+parked = lambda: os.path.exists(gp.PARK_PATH)  # noqa: E731
+p = new()
+p.set_hands(True)
+check("hand interaction on: the worker leaves hand tracking running", p.worker.keep, gp.HAND_UNITS)
+check("not paused: not parked", parked(), False)
+p.game_state(True, 0)
+check("a game pauses Frametop: hand tracking parked", parked(), True)
+p.dashboard_state(True)
+check("the dashboard opens: unparked", parked(), False)
+p.dashboard_state(False)
+check("it closes: parked again", parked(), True)
+p.toggle("gesture", 1)
+check("Frametop toggled back on during the game: unparked", parked(), False)
+p.game_state(False, 10)
+p.game_state(True, 20)
+check("the next game: parked", parked(), True)
+p.set_hands(False)
+check("hand interaction off: unparked (the worker stops it as before)", (parked(), p.worker.keep), (False, ()))
+p.set_hands(True, always=True)
+check("HANDS_MODE=always: the worker leaves hand tracking running", p.worker.keep, gp.HAND_UNITS)
+check("and it isn't parked in the game", parked(), False)
+p.set_hands(False, always=True)
+check("always without hand interaction: still left running", (parked(), p.worker.keep), (False, gp.HAND_UNITS))
+p.set_hands(True)
+check("back to the other modes: parked again", parked(), True)
+p.set_hands(False)
 q.toggle("gesture", 1)
 r = gp.GamePause(lambda *a: None, changes.append, VR)
 check("resumed: the next relay starts running", r.paused, False)
@@ -208,7 +279,5 @@ check("status", sorted(p.status()), sorted(["t", "paused", "reason", "since", "e
                                             "stopped", "gesture_reader", "auto", "desktop"]))
 
 print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)
-for f in os.listdir(tmp):
-    os.remove(os.path.join(tmp, f))
-os.rmdir(tmp)
+shutil.rmtree(tmp)
 sys.exit(1 if failures else 0)

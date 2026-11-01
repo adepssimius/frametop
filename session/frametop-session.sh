@@ -52,11 +52,12 @@ width=${FT_WIDTH:-$WIDTH}
 height=${FT_HEIGHT:-$HEIGHT}
 phys_width=${FT_PHYS_WIDTH:-$PHYS_WIDTH}
 remote=${FT_REMOTE:-$REMOTE}
+notify_forward=${FT_NOTIFY_FORWARD:-$NOTIFY_FORWARD}
 # Floating windows (screens backend): KWin gets this many spare outputs after the screens,
 # and ft-floatd floats a window on each (docs/floating-windows.md). Changing it takes a
 # desktop restart.
 float_slots=${FT_FLOAT_SLOTS:-$FLOAT_SLOTS}
-[[ $float_slots =~ ^[0-9]+$ ]] || float_slots=8
+[[ $float_slots =~ ^[0-9]+$ ]] || float_slots=16
 [ "$float_slots" -le 16 ] || float_slots=16
 [ "$backend" = screens ] || float_slots=0
 # Spare outputs and floating windows currently use KWin scripting. Keep Hyprland
@@ -189,6 +190,7 @@ if [ "${1:-}" != --inner ]; then
   trap stop_screens EXIT
   for _ in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/$socket" ] && break; sleep 0.2; done
   [ -S "$XDG_RUNTIME_DIR/$socket" ] || { echo "ft-screens didn't start (see /tmp/frametop-screens.log)" >&2; exit 1; }
+  handsmode up
   WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/$socket "$0" --inner
   exit
 fi
@@ -202,7 +204,7 @@ fi
 
 # The Plasma desktop isn't a
 # gamescope client with ft-screens, so the gamescope session's Vulkan layer stays off, and
-# the gamescope session's portal config isn't Plasma's.
+# the gamescope session's portal config isn't Plasma's (the desktop's own is set below).
 [ "$backend" = gamescope ] || unset ENABLE_GAMESCOPE_WSI
 unset XDG_DESKTOP_PORTAL_DIR
 [ "$backend" = gamescope ] || screens=${FT_SCREEN_COUNT:-$screens}
@@ -211,6 +213,7 @@ host_runtime=$XDG_RUNTIME_DIR
 runtime=$host_runtime/frametop
 
 cleanup() {
+  [ -n "${watch_pid:-}" ] && kill "$watch_pid" 2>/dev/null || true  # the logout watcher below
   "$here/remote-ctl.sh" stop
   fusermount3 -u -z "$runtime/doc" 2>/dev/null || true
   umount --recursive "$runtime" 2>/dev/null || true
@@ -263,15 +266,51 @@ export XDG_CONFIG_HOME=$HOME/.config/frametop
 export XDG_STATE_HOME=$HOME/.local/state/frametop
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 
+# Title bar buttons for apps that draw their own (session/ft-gtksettings): Firefox and
+# Chromium read GTK's button layout from the Settings portal here, where nothing on SteamOS
+# fills it in, and showed Close alone. ft-gtksettings serves KWin's button order as a
+# Settings portal backend. xdg-desktop-portal 1.18 reads backends from one folder, and with
+# XDG_DESKTOP_PORTAL_DIR set, portals.conf from that folder alone. So this desktop gets its
+# own: the system's backends plus ours, and KDE's portals.conf asking KDE's backend first
+# for settings, then ours. D-Bus starts ours on the desktop's bus (the folder added to
+# XDG_DATA_DIRS has its service file).
+portals=$runtime/portals services=$runtime/share/dbus-1/services
+mkdir -p "$portals" "$services"
+ln -sf /usr/share/xdg-desktop-portal/portals/*.portal "$portals/" 2>/dev/null || true
+cat > "$portals/frametop.portal" <<EOF
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.frametop
+Interfaces=org.freedesktop.impl.portal.Settings;
+EOF
+cat > "$services/org.freedesktop.impl.portal.desktop.frametop.service" <<EOF
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.frametop
+Exec=/bin/sh -c 'exec "$here/ft-gtksettings" > /tmp/frametop-gtksettings.log 2>&1'
+EOF
+kde_portals=/usr/share/xdg-desktop-portal/kde-portals.conf
+{ [ -r "$kde_portals" ] && sed '/^org\.freedesktop\.impl\.portal\.Settings=/d' "$kde_portals" ||
+  printf '[preferred]\ndefault=kde\n'; } |
+  sed '/^\[preferred\]/a org.freedesktop.impl.portal.Settings=kde;frametop;' \
+  > "$portals/kde-portals.conf"
+export XDG_DESKTOP_PORTAL_DIR=$portals
+export XDG_DATA_DIRS=$runtime/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+# Firefox (and other Gecko browsers) draw their own title bar by default, without Frametop's
+# float button. FIREFOX_TITLEBAR=kwin (the default) gives them KWin's instead: with
+# MOZ_GTK_TITLEBAR_DECORATION=none, Firefox's automatic title bar setting picks the system one,
+# here only, and nothing changes in its profile, so outside this desktop it keeps its own.
+# Firefox can't draw its own then, whatever its Customize Toolbar says; FIREFOX_TITLEBAR=firefox
+# leaves it that choice (its own title bar by default).
+[ "$FIREFOX_TITLEBAR" = firefox ] || export MOZ_GTK_TITLEBAR_DECORATION=${MOZ_GTK_TITLEBAR_DECORATION:-none}
+
 # The cursor: the Steam client's XCURSOR_THEME=steam comes along in the environment, and
 # KWin and the apps take it over this desktop's own setting. SteamOS had no theme of that
 # name, so they fell back to Breeze; SteamOS 0.4 has one (holo-cursors: Steam's arrow, the
-# rest Breeze Light). The theme is this desktop's own (System Settings, Breeze unless
-# changed there); the size stays what it was, unless one is set there too.
+# rest Breeze Light). The theme and the size are this desktop's own (System Settings,
+# Breeze and 24 unless changed there). The gamescope session's XCURSOR_SIZE is 256, for
+# its own cursor: Breeze's SVG cursors draw at that size, times the screen's scale.
 cursor_theme=$(kreadconfig6 --file kcminputrc --group Mouse --key cursorTheme)
 cursor_size=$(kreadconfig6 --file kcminputrc --group Mouse --key cursorSize)
-export XCURSOR_THEME=${cursor_theme:-breeze_cursors}
-[ -z "$cursor_size" ] || export XCURSOR_SIZE=$cursor_size
+export XCURSOR_THEME=${cursor_theme:-breeze_cursors} XCURSOR_SIZE=${cursor_size:-24}
 
 # Remote desktop over VNC: session/remote-desktop.sh captures the desktop with
 # krdp on 127.0.0.1, and session/vnc-bridge.sh re-serves its primary screen over VNC. krdpserver runs from the container, so KWin can't
@@ -318,6 +357,78 @@ else
   rm -f "$autostart"
 fi
 
+# ft-dashroute: with DASHBOARD_APPS=frametop, apps from the SteamVR dashboard's Launch a program
+# list float in this desktop instead of opening as SteamVR windows (float/ft-dashroute). It runs
+# whenever windows can float and reads the setting as it goes.
+autostart=$XDG_CONFIG_HOME/autostart/frametop-dashroute.desktop
+if [ "$float_slots" -gt 0 ]; then
+  cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop dashboard apps
+Exec=sh -c 'exec /usr/bin/python3 -I "$here/../float/ft-dashroute" > /tmp/frametop-dashroute.log 2>&1'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+else
+  rm -f "$autostart"
+fi
+
+# ft-notifyfwd shows this desktop's notifications in the Steam session (in VR, with a VR
+# notification server there), with their buttons, through the user bus's notification
+# server; Plasma's own popups stay off while it does. NOTIFY_FORWARD: auto (only when that
+# server isn't SteamOS's steam_notif_daemon) | on | off.
+autostart=$XDG_CONFIG_HOME/autostart/frametop-notifyfwd.desktop
+case $notify_forward in
+  auto | on)
+    mkdir -p "$(dirname "$autostart")"
+    cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop notifications in VR
+Exec=sh -c 'exec "$here/ft-notifyfwd" $notify_forward > /tmp/frametop-notifyfwd.log 2>&1'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+    ;;
+  *) rm -f "$autostart" ;;
+esac
+
+# Frunner (frunner/ft-frunner, Meta+Space): the search for apps and remote displays, up
+# exactly while this desktop is. ft-screens gives it the typing while it's open (screens backend).
+rm -f "$XDG_CONFIG_HOME/autostart/frametop-spotwatch.desktop"  # its name before 2026-10-20
+autostart=$XDG_CONFIG_HOME/autostart/frametop-frunner.desktop
+if [ "$backend" = screens ]; then
+  mkdir -p "$(dirname "$autostart")"
+  cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop frunner
+Exec=sh -c 'exec "$here/../frunner/ft-frunner" > /tmp/frametop-frunner.log 2>&1'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+else
+  rm -f "$autostart"
+fi
+
+# Frametop Tour (tour/ft-tour): opens when this desktop starts until it's been closed, skipped,
+# or finished once (~/.local/state/frametop/tour.json; tour/ft-tour --reset shows it again).
+autostart=$XDG_CONFIG_HOME/autostart/frametop-tour.desktop
+if [ "$backend" = screens ]; then
+  mkdir -p "$(dirname "$autostart")"
+  cat > "$autostart" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Frametop Tour
+Exec=sh -c 'exec "$here/../tour/ft-tour" --first-run > /tmp/frametop-tour.log 2>&1'
+X-KDE-autostart-phase=2
+NoDisplay=true
+EOF
+else
+  rm -f "$autostart"
+fi
+
 # Launch as Standalone in every app's right-click menu (float/ft_apps.py): copies of the
 # apps' desktop files with that action, first in XDG_DATA_DIRS, so only this desktop sees
 # them. Written now, before Plasma reads them; ft-floatd keeps them up to date.
@@ -344,6 +455,13 @@ elif [ "$(kreadconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key library --delete
   kwriteconfig6 --file "$kwinrc" --group org.kde.kdecoration2 --key theme --delete
 fi
+
+# No edge barrier between screens: KWin holds a pointer moving to another screen at the
+# old one's edge until it has pushed past the barrier, but each screen here is a panel of
+# its own, and the pointer jumps between them. A click on the desktop right after one on a
+# floating window landed on that window again (past its width, or 200 px off).
+kwriteconfig6 --file "$kwinrc" --group EdgeBarrier --key EdgeBarrier 0
+kwriteconfig6 --file "$kwinrc" --group EdgeBarrier --key CornerBarrier false
 
 # KWin draws through zink on the headset's GPU, which vrcompositor needs, so the blur and
 # background contrast behind panels and menus and the window animations cost frames for
@@ -396,5 +514,37 @@ kwriteconfig6 --file "$XDG_CONFIG_HOME/ksmserverrc" --group General --key loginM
 # doesn't have, like a spare output or a screen a smaller layout dropped. Put such a panel
 # back on the first (primary) screen before Plasma reads the file (session/fix-panels.py).
 python3 "$here/fix-panels.py" --screens "$screens" || true
+
+# Plasma's logout (Leave) ends its session manager and then KWin, and this script ends with
+# them. KWin 6.2.5 can crash on the way out (SIGSEGV in its libei backend's teardown, with
+# a Deskflow client connected, which sends its input through libei), and its wrapper then
+# starts a fresh KWin with no Plasma: a black screen that never ends. So watch for the
+# session manager leaving while KWin stays, and end KWin's wrapper, which ends startplasma
+# and this script with it. The watcher looks for the session manager only until Plasma has
+# started it, then waitpid sleeps until it exits: looking every 3 seconds for the whole
+# session cost about 1% of a core. The wrapper is matched from the start of its command
+# line, since pgrep -f alone also matches a shell whose command names it.
+ours() { [ "$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^XDG_RUNTIME_DIR=//p')" = "$XDG_RUNTIME_DIR" ]; }
+ours_pid() {
+  local p
+  for p in $(pgrep "$@"); do ours "$p" && { echo "$p"; return 0; }; done
+  return 1
+}
+logout_watch() {
+  local ksm= p
+  for _ in $(seq 40); do ksm=$(ours_pid -x ksmserver) && break; sleep 3; done
+  [ -n "$ksm" ] || return 0  # no Plasma after 2 minutes: nothing to watch
+  if command -v waitpid > /dev/null; then
+    waitpid "$ksm" 2>/dev/null || true
+  else
+    while [ -e "/proc/$ksm" ]; do sleep 3; done
+  fi
+  sleep 9
+  for p in $(pgrep -f '^/usr/bin/kwin_wayland_wrapper( |$)'); do
+    ours "$p" && { echo "frametop: Plasma logged out but KWin stayed; ending it" >&2; kill "$p" 2>/dev/null || true; }
+  done
+}
+logout_watch &
+watch_pid=$!
 
 dbus-run-session startplasma-wayland

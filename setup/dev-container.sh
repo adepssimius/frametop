@@ -18,7 +18,7 @@ packages=(
   mesa-libgbm-devel wayland-devel vulkan-loader-devel vulkan-headers plasma-wayland-protocols wlroots-devel
   # ft_pointer SteamVR driver: static C++ runtime (the host has an older glibc)
   libstdc++-static
-  # hand tracking (deferred: not installed by install.sh; hands/run.sh install builds it): ft-hands
+  # hand tracking (install.sh offers it; hands/run.sh install builds it): ft-hands
   # reads the calibration with jsoncpp; ft-camd runs on the host, linked statically. Its Python
   # tools (hands/tools) need NumPy and OpenCV, which aren't here: Fedora's python3-opencv pulls
   # in over a gigabyte (hands/README.md says how to get them)
@@ -26,10 +26,21 @@ packages=(
   # hand recorder (hands/rec): its export compresses recordings with zstd; its Upload page and
   # hub.py upload to Hugging Face with huggingface_hub (also the hf command, for hf auth login)
   zstd python3-huggingface-hub
+  # eye recorder (gaze/rec): its export encrypts to the dataset's keys with age (recorder/age.py),
+  # on Python's cryptography
+  python3-cryptography
   # Frametop Input Settings app (Kirigami, PySide6)
   python3-pyside6 kf6-kirigami kf6-qqc2-desktop-style qt6-qtwayland breeze-icon-theme plasma-breeze
   # Frametop remote desktop (VNC bridge through krdp)
   krdp freerdp tigervnc-x11-server xrandr
+  # Frametop Voice (voice/): glslc and the SPIR-V headers for whisper.cpp's Vulkan backend; ft-voiced
+  # records with pw-record and plays its sounds with pw-play (its Python packages: voice/build.sh's build/venv)
+  glslc spirv-headers-devel pipewire-utils
+  # Frametop's keyboard (keyboard/, TaiKeid's Full Keyboard): Cairo and Pango draw it, SDL2 for its
+  # preview, and its input methods: Hangul, Pinyin (pyzy), Japanese (Anthy, loaded at run time).
+  # libX11-devel: its test probes (FULL_KEYBOARD_TESTS=1 keyboard/build.sh)
+  cairo-devel pango-devel json-c-devel sdl2-compat-devel libhangul-devel pyzy-devel anthy-unicode-devel
+  libX11-devel
   # remote displays (stream/): moonlight-common-c and moonlight-embedded's libgamestream,
   # and the host's sound (Opus, played through PipeWire's PulseAudio server)
   openssl-devel libcurl-devel expat-devel libuuid-devel json-devel opus-devel pulseaudio-libs-devel

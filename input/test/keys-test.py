@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Offline test of the input relay's key combinations and modifier taps, and of which keys and
-mouse buttons reach the desktop (ft-screens).
+"""Offline test of the input relay's key combinations and modifier taps, of which keys and
+mouse buttons reach the desktop (ft-screens), of dictation (Frametop Voice): the keys that
+start and stop it, and the text it has the relay type, and of Full Keyboard's typing.
 
 Runs the relay's main() against a fake pass-through keyboard, a fake mouse, and two fake nodes
 with volume keys, a keyboard's Consumer Control node and the headset's gpio-keys (pipes), with
@@ -13,6 +14,7 @@ relay, so it's safe next to them. Rules come from the test, not ~/.config/framet
 """
 import fcntl
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -27,6 +29,9 @@ relay_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "inp
 tag = f"ft_keys_test_{os.getpid()}"
 with open(relay_path) as f:
     src = f.read().replace('"\\0frametop_relay"', f'"\\0{tag}_relay"')
+screens_socket = "screens_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)"
+assert src.count(screens_socket) == 1, "relay's screens socket constructor changed"
+src = src.replace(screens_socket, "screens_sock = _test_screens_sender")
 relay = importlib.util.module_from_spec(importlib.util.spec_from_loader("relay", loader=None))
 relay.__file__ = os.path.abspath(relay_path)
 sys.path.insert(0, os.path.dirname(os.path.abspath(relay_path)))  # its game_pause and vrws
@@ -58,13 +63,13 @@ class StubPause:
     def configure(self, *args):
         pass
 
-    game_state = tick = helper_started = controllers_changed = configure
+    game_state = tick = helper_started = controllers_changed = set_hands = dashboard_state = screens_seen = configure
 
 
 stub = {}
 relay.game_pause.GamePause = StubPause
 
-for name in ("SCREENS", "HELPER", "FLOAT", "GAZED", "KEYS"):
+for name in ("SCREENS", "HELPER", "FLOAT", "GAZED", "VOICE", "FRUNNER"):
     setattr(relay, name, f"\0{tag}_{name.lower()}")
 OUT = tempfile.mkdtemp(prefix="ft-keys-test-")
 steam_log, cmd_log = f"{OUT}/steam.log", f"{OUT}/cmd.log"
@@ -110,6 +115,7 @@ def read_rules(path=None):
     return rules
 
 
+real_read_rules = relay.read_rules  # the file reader, for the renamed-actions check
 relay.read_rules = read_rules
 conf = {"POINTER": "0"}  # ~/.config/frametop.conf, as the relay reads it
 relay.read_config = lambda path=None: dict(conf)
@@ -173,9 +179,18 @@ def probe(path):
 
 relay.probe = probe
 
-screens = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+# A connected pair holds all 16 startup releases even when the kernel limits unconnected
+# datagram queues to 10 messages. The relay still uses real sendto(), including other peers.
+relay._test_screens_sender, screens = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+relay._test_screens_sender.setblocking(False)
 screens.bind(relay.SCREENS)
 screens.settimeout(0.05)
+voice = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)  # Frametop Voice's socket
+voice.bind(relay.VOICE)
+voice.settimeout(0.05)
+frunner = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)  # frunner's socket (frunner/ft-frunner)
+frunner.bind(relay.FRUNNER)
+frunner.settimeout(0.05)
 EVENT = struct.Struct("llHHi")
 
 
@@ -198,6 +213,42 @@ def typed():
             got.append(screens.recv(256).decode())
         except socket.timeout:
             return got
+
+
+def frunner_got():
+    """What frunner was sent since the last call."""
+    got = []
+    while True:
+        try:
+            got.append(frunner.recv(256).decode())
+        except socket.timeout:
+            return got
+
+
+def dictation():
+    """What Frametop Voice was sent since the last call."""
+    got = []
+    while True:
+        try:
+            got.append(voice.recv(256).decode())
+        except socket.timeout:
+            return got
+
+
+def to_relay(text):
+    c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    c.sendto(text.encode(), f"\0{tag}_relay")
+    c.close()
+
+
+def keys_for(text, keys=None):
+    """The presses and releases that type text, as (code, value), modifiers included: on a US
+    layout, or keys ({character: (code, modifiers)})."""
+    out = []
+    for ch in text:
+        code, mods = (keys or relay.US_KEYS)[ch]
+        out += [(m, 1) for m in mods] + [(code, 1), (code, 0)] + [(m, 0) for m in reversed(mods)]
+    return out
 
 
 def emitted():
@@ -247,7 +298,7 @@ def check(label, got, want):
         failures.append(label)
 
 
-META, RMETA, SHIFT, CTRL, RCTRL, ALT, A, F, J, P, TAB = 125, 126, 42, 29, 97, 56, 30, 33, 36, 25, 15
+META, RMETA, SHIFT, CTRL, RCTRL, ALT, A, C, F, J, P, TAB = 125, 126, 42, 29, 97, 56, 30, 46, 33, 36, 25, 15
 F24 = ["key 194 1", "key 194 0"]
 
 
@@ -326,9 +377,9 @@ def tests():
     check("Meta tap bound to none: nothing", lines(steam_log), ["menu", "menu"])
     check("Meta tap bound to none: no F24", typed(), ["key 125 1", "key 125 0"])
 
-    use({"29": f"command:command -v ft-steam ft-layout ft-float | wc -l >> {cmd_log}"})
+    use({"29": f"command:command -v ft-steam ft-layout ft-float ft-voice | wc -l >> {cmd_log}"})
     key(RCTRL, 1); key(RCTRL, 0)
-    check("right Ctrl tap runs its command, which finds Frametop's tools", lines(cmd_log), ["combo", "3"])
+    check("right Ctrl tap runs its command, which finds Frametop's tools", lines(cmd_log), ["combo", "4"])
     check("Ctrl tap: F24 before Ctrl's release", typed(), ["key 97 1"] + F24 + ["key 97 0"])
 
     use({"125+36": "gaze_left", "29": f"command:echo paused >> {cmd_log}", "42+125+25": "pause_toggle"})
@@ -338,7 +389,18 @@ def tests():
     check("paused: Meta+J (gaze click) does nothing and is typed as is", typed(),
           ["key 125 1", "key 36 1", "key 36 0", "key 125 0"])
     key(RCTRL, 1); key(RCTRL, 0)
-    check("paused: a command still runs", lines(cmd_log), ["combo", "3", "paused"])
+    check("paused: a command still runs", lines(cmd_log), ["combo", "4", "paused"])
+    # Your commands (run:NAME): a plain process here (FT_COMMANDS_NO_SYSTEMD), the list in OUT.
+    relay.ft_commands.COMMANDS_PATH = f"{OUT}/commands.json"
+    os.environ["FT_COMMANDS_NO_SYSTEMD"] = "1"
+    relay.ft_commands.save([{"name": "note-it", "run": f"echo named >> {cmd_log}"}], aliases=False)
+    use({"125+36": "gaze_left", "29": "run:note-it", "42+125+25": "pause_toggle"})
+    key(RCTRL, 1); key(RCTRL, 0)
+    for _ in range(40):
+        if lines(cmd_log)[-1:] == ["named"]:
+            break
+        time.sleep(0.05)
+    check("paused: your command (run:NAME) runs too, in the background", lines(cmd_log), ["combo", "4", "paused", "named"])
     typed()
     key(SHIFT, 1); key(META, 1); key(P, 1); key(P, 0); key(META, 0); key(SHIFT, 0)
     check("paused: Meta+Shift+P (pause_toggle) resumes", stub["pause"].paused, False)
@@ -360,7 +422,7 @@ def tests():
                 m = helper.recv(256).decode()
             except socket.timeout:
                 return got
-            if m == "hide" or (m.startswith("btn ") and not m.startswith("btn a ")):
+            if m.startswith("hide") or (m.startswith("btn ") and not m.startswith("btn a ")):
                 got.append(m)
 
     conf["POINTER"] = "1"
@@ -370,7 +432,7 @@ def tests():
     check("pointer mode: a held left button reaches the helper", clicks(), ["btn trigger 1"])
     pause("on")
     check("pause with the left button held: it comes up, then the pointer hides", clicks(),
-          ["btn trigger 0", "hide"])
+          ["btn trigger 0", "hide pause"])
     key(relay.BTN_LEFT, 0, ms_w)
     check("paused: its release reaches no one", clicks(), [])
     pause("off")
@@ -421,10 +483,182 @@ def tests():
     check("spinning works without pointer mode", (relay.needs_pointer("spin_next"), relay.needs_pointer("spin_prev")),
           (False, False))
 
+    # Meta+Space (a default): frunner's search opens or closes, told it came from a keyboard.
+    SPACE = 57
+    key(META, 1); key(SPACE, 1); key(SPACE, 0); key(META, 0)
+    check("Meta+Space (default): frunner toggles", frunner_got(), ["toggle keyboard"])
+    check("...Space isn't typed, and the desktop gets F24 and Meta's release first", typed(),
+          ["key 125 1"] + F24 + ["key 125 0"])
+    pause("on")
+    key(META, 1); key(SPACE, 1); key(SPACE, 0); key(META, 0)
+    check("paused: Meta+Space doesn't open frunner", frunner_got(), [])
+    pause("off")
+    typed()
+    check("frunner works without pointer mode", relay.needs_pointer("frunner"), False)
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as old:
+        json.dump({"buttons": {"mouse": {"275": "spotwatch"}}, "controller_buttons": {"left/view": "spotwatch"},
+                   "key_bindings": {"125+57": "spotwatch", "125": "steam_menu"}}, old)
+        old.flush()
+        r = real_read_rules(old.name)
+    check("a rules file from before the rename: spotwatch means frunner",
+          (r["buttons"], r["controller_buttons"], r["key_bindings"]),
+          ({"mouse": {"275": "frunner"}}, {"left/view": "frunner"}, {"125+57": "frunner", "125": "steam_menu"}))
+
+    # Dictation: Right Ctrl alone (the default with Frametop Voice installed) starts and stops it.
+    use({"97": "dictate"})
+    dictation()
+    key(RCTRL, 1); key(RCTRL, 0)
+    check("Right Ctrl tap (dictate): Frametop Voice toggles", dictation(), ["toggle keyboard"])
+    check("...and the desktop gets F24 before Ctrl's release", typed(), ["key 97 1"] + F24 + ["key 97 0"])
+    key(CTRL, 1); key(CTRL, 0)
+    check("a Left Ctrl tap isn't Right Ctrl's", dictation(), [])
+    key(SHIFT, 1); key(RCTRL, 1); key(RCTRL, 0); key(SHIFT, 0)
+    check("Shift held, then a Right Ctrl tap: not dictation", dictation(), [])
+    key(RCTRL, 1); key(SHIFT, 1); key(SHIFT, 0); key(RCTRL, 0)
+    check("Right Ctrl held, Shift pressed and released: not dictation", dictation(), [])
+    key(RCTRL, 1); key(C, 1); key(C, 0); key(RCTRL, 0)
+    check("Right Ctrl+C: not dictation", dictation(), [])
+    key(RCTRL, 1); key(relay.BTN_LEFT, 1, ms_w); key(relay.BTN_LEFT, 0, ms_w); key(RCTRL, 0)
+    check("Right Ctrl+click: not dictation", dictation(), [])
+    use({"29": "dictate"})
+    key(CTRL, 1); key(CTRL, 0); key(RCTRL, 1); key(RCTRL, 0)
+    check("a Ctrl tap bound by its left code: either side", dictation(), ["toggle keyboard", "toggle keyboard"])
+    use({"97": "dictate_hold"})
+    key(RCTRL, 1)
+    check("Right Ctrl bound to dictate_hold: starts on the press", dictation(), ["start keyboard"])
+    key(RCTRL, 0)
+    check("...and stops on the release", dictation(), ["stop keyboard"])
+    key(CTRL, 1); key(CTRL, 0)
+    check("...Left Ctrl doesn't", dictation(), [])
+    key(RCTRL, 1); key(F, 1)
+    check("Right Ctrl+F while held: a shortcut, so that dictation is cancelled quietly", dictation(),
+          ["start keyboard", "cancel keyboard quiet"])
+    key(F, 0); key(RCTRL, 0)
+    check("...and its release does nothing more", dictation(), [])
+    key(SHIFT, 1); key(RCTRL, 1); key(RCTRL, 0); key(SHIFT, 0)
+    check("Right Ctrl with Shift held: not on its own, no dictation", dictation(), [])
+    use({"29+42+33": "dictate_hold"})
+    key(CTRL, 1); key(SHIFT, 1); key(F, 1)
+    check("Ctrl+Shift+F held (dictate_hold): starts", dictation(), ["start keyboard"])
+    key(F, 0); key(SHIFT, 0); key(CTRL, 0)
+    check("...and its release stops", dictation(), ["stop keyboard"])
+    use({"97": "dictate"})
+    pause("on")
+    key(RCTRL, 1); key(RCTRL, 0)
+    check("paused: dictation still toggles", dictation(), ["toggle keyboard"])
+    pause("off")
+    check("dictation works without pointer mode",
+          (relay.needs_pointer("dictate"), relay.needs_pointer("dictate_hold")), (False, False))
+    unit = os.path.join(OUT, "frametop-voice.service")
+    relay.VOICE_UNIT = unit
+    check("defaults without Frametop Voice: no dictation key", "97" in relay.default_key_bindings(), False)
+    open(unit, "w").close()
+    check("defaults with Frametop Voice installed: Right Ctrl tap", relay.default_key_bindings().get("97"), "dictate")
+
+    # Typing dictation's text: on the virtual keyboard while typing goes to Steam, to the desktop
+    # while it goes there; held back while a modifier is held.
+    use({})
+    typed(), emitted()
+    to_relay("type Hi, you!")
+    time.sleep(0.3)
+    check("type: to the virtual keyboard while typing goes to Steam", emitted(),
+          [("keyboard", c, v) for c, v in keys_for("Hi, you!")])
+    check("...and not to the desktop", typed(), [])
+    to_relay("type caf\u00e9\tok")
+    time.sleep(0.3)
+    check("type: what a US layout can't type is dropped", emitted(), [("keyboard", c, v) for c, v in keys_for("cafok")])
+    key(CTRL, 1)
+    to_relay("type ab")
+    time.sleep(0.3)
+    check("type: waits while Ctrl is held", emitted(), [])
+    key(CTRL, 0)
+    time.sleep(0.3)
+    check("...and types once it's released", emitted(), [("keyboard", c, v) for c, v in keys_for("ab")])
+    typed()
+    to_relay("keyboard desktop")
+    to_relay("type Ok.")
+    time.sleep(0.3)
+    check("type: to the desktop while typing goes there", typed(), [f"key {c} {v}" for c, v in keys_for("Ok.")])
+    check("...and not to the virtual keyboard", emitted(), [])
+    use({"97": "dictate_hold"})
+    dictation()
+    key(RCTRL, 1)
+    to_relay("type ok")
+    time.sleep(0.3)
+    check("held to talk: live text reaches the desktop while Right Ctrl is held, without it",
+          typed(), [f"key {c} {v}" for c, v in keys_for("ok")])
+    key(RCTRL, 2); key(RCTRL, 0)
+    check("...nor its repeats or release", typed(), [])
+    check("...and dictation ran from press to release", dictation(), ["start keyboard", "stop keyboard"])
+    key(RCTRL, 1); key(C, 1); key(C, 0); key(RCTRL, 0)
+    check("held to talk, then C: the desktop gets Right Ctrl before C (a shortcut after all)", typed(),
+          ["key 97 1", f"key {C} 1", f"key {C} 0", "key 97 0"])
+    check("...and that dictation is cancelled quietly", dictation(), ["start keyboard", "cancel keyboard quiet"])
+    key(RCTRL, 1); key(SHIFT, 1)
+    check("held to talk, then Shift: cancelled, and the desktop gets both", (dictation(), typed()),
+          (["start keyboard", "cancel keyboard quiet"], ["key 97 1", f"key {SHIFT} 1"]))
+    key(SHIFT, 0); key(RCTRL, 0)
+    typed()
+    to_relay("keyboard steam")
+    key(RCTRL, 1)
+    to_relay("type ab")
+    time.sleep(0.3)
+    check("held to talk while typing goes to Steam (it sees the key itself): the text waits", emitted(), [])
+    key(RCTRL, 0)
+    time.sleep(0.3)
+    check("...until the release", emitted(), [("keyboard", c, v) for c, v in keys_for("ab")])
+    dictation()
+    to_relay("keyboard desktop")
+    use({})
+
+    # The desktop's own layout (kxkbrc): German QWERTZ, through libxkbcommon.
+    rc = os.path.join(OUT, "kxkbrc")
+    with open(rc, "w") as f:
+        f.write("[Layout]\nLayoutList=de,us\nUse=true\n")
+    relay.KXKBRC = rc
+    try:
+        de = relay.layout_keys("de")
+    except OSError as e:
+        de = None
+        print(f"skip  German layout typing: {e}")
+    if de:
+        check("German layout: z is the US Y key, y the US Z key, @ is AltGr+Q, < the ISO key",
+              (de["z"], de["y"], de["@"], de["<"], de["\u00e4"]),
+              ((21, ()), (44, ()), (16, (100,)), (86, ()), (40, ())))
+        to_relay("type way @ f\u00fcr")
+        time.sleep(0.3)
+        check("type on a German desktop: its keys, AltGr and umlauts included", typed(),
+              [f"key {c} {v}" for c, v in keys_for("way @ f\u00fcr", de)])
+        to_relay("type a\u00e9b")
+        time.sleep(0.3)
+        check("...a character it has no key for (a dead key's accent) is dropped", typed(),
+              [f"key {c} {v}" for c, v in keys_for("ab", de)])
+        check("...and the log says which", [m for m in LOG if m.startswith("typing: 1 characters")][-1:],
+              ["typing: 1 characters the desktop's layout (de) has no key for: \u00e9"])
+        to_relay("keyboard steam")
+        to_relay("type way")
+        time.sleep(0.3)
+        check("...Steam and games still get a US layout", emitted(), [("keyboard", c, v) for c, v in keys_for("way")])
+        to_relay("keyboard desktop")
+    with open(rc, "w") as f:
+        f.write("[Layout]\nLayoutList=de\nUse=false\n")
+    to_relay("type way")
+    time.sleep(0.3)
+    check("layouts switched off in kxkbrc (Use=false): a US layout", typed(),
+          [f"key {c} {v}" for c, v in keys_for("way")])
+    relay.KXKBRC = os.path.join(OUT, "no-kxkbrc")
+    to_relay("keyboard steam")
+
     check("an empty command isn't an action", relay.known_action("command:  "), False)
-    check("steam_menu, pause_toggle and commands work without pointer mode",
-          (relay.needs_pointer("steam_menu"), relay.needs_pointer("pause_toggle"), relay.needs_pointer("command:ls")),
-          (False, False, False))
+    check("run:NAME: an action that needs a name, no pointer mode, and works paused",
+          (relay.known_action("run:  "), relay.known_action("run:x"), relay.needs_pointer("run:x"), relay.works_paused("run:x")),
+          (False, True, False, True))
+    check("steam_menu, pause_toggle, hands_toggle and commands work without pointer mode",
+          (relay.needs_pointer("steam_menu"), relay.needs_pointer("pause_toggle"), relay.needs_pointer("hands_toggle"),
+           relay.needs_pointer("command:ls")),
+          (False, False, False, False))
+    check("Meta+H toggles hand tracking by default", (relay.known_action("hands_toggle"),
+                                                      relay.DEFAULT_KEY_BINDINGS.get("125+35")), (True, "hands_toggle"))
 
     # A text field on the desktop got focus (ft-textinput): Frametop's keyboard by the Keyboard
     # setting, and a log line saying why, once per decision (scripts/report.sh reads them).
@@ -454,6 +688,151 @@ def tests():
     check("text field, setting never: no keyboard, logged",
           (text_field(), said()), ([], ["text field focused: not opening Frametop's keyboard (Keyboard setting: never)"]))
     vr_keyboard["mode"] = None
+    use(None)
+
+    # The gaze calibration panel (the helper's "calpanel 1"): Enter takes its dot ("calkey 1" to
+    # the helper) and isn't typed, its press, repeats and release; with a modifier held, or once
+    # the panel is gone or lapsed, Enter is typed again.
+    ENTER, KPENTER = relay.KEY_ENTER, relay.KEY_KPENTER
+
+    def cal_keys():
+        got = []
+        while True:
+            try:
+                m = helper.recv(256).decode()
+            except socket.timeout:
+                return got
+            if m.startswith("calkey"):
+                got.append(m)
+
+    def panel(on):
+        to_relay(f"calpanel {on}")
+        time.sleep(0.1)
+
+    use({})
+    typed(), cal_keys()
+    key(ENTER, 1); key(ENTER, 0)
+    check("Enter without the panel: typed", (cal_keys(), typed()), ([], ["key 28 1", "key 28 0"]))
+    panel(1)
+    key(ENTER, 1); key(ENTER, 2); key(ENTER, 2); key(ENTER, 0)
+    check("panel up: Enter takes the dot, once", cal_keys(), ["calkey 1"])
+    check("...and its press, repeats and release aren't typed", typed(), [])
+    key(KPENTER, 1); key(KPENTER, 0)
+    check("panel up: keypad Enter too", (cal_keys(), typed()), (["calkey 1"], []))
+    key(SHIFT, 1); key(ENTER, 1); key(ENTER, 0); key(SHIFT, 0)
+    check("panel up, Shift held: Enter is typed", (cal_keys(), typed()),
+          ([], ["key 42 1", "key 28 1", "key 28 0", "key 42 0"]))
+    key(A, 1); key(A, 0)
+    check("panel up: other keys are typed", (cal_keys(), typed()), ([], ["key 30 1", "key 30 0"]))
+    key(ENTER, 1); panel(0); key(ENTER, 0)
+    check("panel gone while Enter is held: it took the dot, and its release isn't typed",
+          (cal_keys(), typed()), (["calkey 1"], []))
+    key(ENTER, 1); key(ENTER, 0)
+    check("panel gone: Enter is typed", (cal_keys(), typed()), ([], ["key 28 1", "key 28 0"]))
+    panel(1)
+    time.sleep(3.1)  # no renewal: the claim lapses after 3 s
+    key(ENTER, 1); key(ENTER, 0)
+    check("panel claim lapsed: Enter is typed", (cal_keys(), typed()), ([], ["key 28 1", "key 28 0"]))
+
+    # Full Keyboard (keyboard/, --frametop): it says hello, hears where typing goes and whether
+    # the screens show, and types on the desktop through the relay.
+    use({})
+    kb = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    kb.bind("")  # autobound, as Full Keyboard's
+    kb.settimeout(0.05)
+
+    def heard():
+        """What Full Keyboard was sent since the last call."""
+        got = []
+        while True:
+            try:
+                got.append(kb.recv(256).decode())
+            except socket.timeout:
+                return got
+
+    def from_kb(text, sock=kb):
+        sock.sendto(text.encode(), f"\0{tag}_relay")
+        time.sleep(0.1)
+
+    typed(), emitted()
+    from_kb("kbhello 0")
+    check("Full Keyboard's hello: the word back (Steam, nothing shown)", heard(), ["kb 0 0"])
+    check("...and ft-screens hears it's there", [m for m in typed() if m.startswith("fullkb")], ["fullkb 0"])
+    check("...logged", [m for m in LOG if m.startswith("Full Keyboard")][-1:], ["Full Keyboard connected"])
+    to_relay("keyboard desktop 1")
+    time.sleep(0.1)
+    check("typing goes to the desktop, the screens show: it hears at once", heard(), ["kb 1 1"])
+    from_kb("kbhello 1")
+    check("a hello always gets the word", heard(), ["kb 1 1"])
+    check("...and ft-screens hears it's up", [m for m in typed() if m.startswith("fullkb")], ["fullkb 1"])
+    from_kb("kbkey 30 1")
+    from_kb("kbkey 30 0")
+    check("its keys reach the desktop", (typed(), emitted()), (["key 30 1", "key 30 0"], []))
+    LOG.clear()
+    from_kb("kbtext a\u00e9b")
+    from_kb(f"kbkey {ENTER} 1")
+    from_kb(f"kbkey {ENTER} 0")
+    check("its text through the desktop's layout, then its key, in order", typed(),
+          [f"key {c} {v}" for c, v in keys_for("ab")] + ["key 28 1", "key 28 0"])
+    check("...what the layout can't type isn't logged by name",
+          [m for m in LOG if m.startswith("typing")], ["typing: 1 characters the desktop's layout (us) has no key for"])
+    from_kb(f"kbkey {SHIFT} 1")
+    to_relay("keyboard steam 1")
+    time.sleep(0.1)
+    check("typing goes to Steam: it hears", heard(), ["kb 0 1"])
+    from_kb(f"kbkey {SHIFT} 0")
+    from_kb("kbkey 30 1")
+    from_kb("kbkey 30 0")
+    check("a key held from before comes up on the desktop", typed(), [f"key {SHIFT} 1", f"key {SHIFT} 0"])
+    check("...and new ones go to the virtual keyboard", emitted(), [("keyboard", 30, 1), ("keyboard", 30, 0)])
+    to_relay("keyboard steam 0")
+    heard()
+    to_relay("keyboard hyprland shown=1")
+    time.sleep(0.1)
+    check("Hyprland focus and visibility reach Full Keyboard", heard(), ["kb 1 1"])
+    from_kb("kbkey 30 1")
+    from_kb("kbkey 30 0")
+    check("Full Keyboard types into Hyprland", (typed(), emitted()), (["key 30 1", "key 30 0"], []))
+    to_relay("keyboard hyprland 0 shown=0")
+    heard()
+    other = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    other.bind("")
+    to_relay("keyboard desktop 1")
+    from_kb("kbkey 30 1", other)
+    from_kb("kbtext x", other)
+    check("keys and text from another address are ignored", (typed(), emitted()), ([], []))
+    other.close()
+    heard()
+    to_relay("kbpanel show")
+    check("ft-screens' kbpanel show: Full Keyboard opens", heard(), ["kb show"])
+    to_relay("kbpanel hide")
+    check("...and hide", heard(), ["kb hide"])
+    to_relay("kbpoke right press 0.1200 1.0500 -0.6500")
+    to_relay("kbpoke left end")
+    check("ft-screens' kbpoke: a fingertip's poke goes on to Full Keyboard", heard(),
+          ["kb poke right press 0.1200 1.0500 -0.6500", "kb poke left end"])
+    to_relay("kbpoke right press 1e9 0 0")
+    to_relay("kbpoke middle hover 0 0 0")
+    to_relay("kbpoke right type 0 0 0")
+    check("...malformed ones don't", heard(), [])
+    pause("on")
+    time.sleep(0.1)
+    check("paused: typing to Steam, and not over the screens", heard(), ["kb 0 0"])
+    pause("off")
+    to_relay("keyboard desktop 1")
+    from_kb("kbhello 1")
+    heard()
+    from_kb("kbkey 30 1")
+    time.sleep(1.2)  # the relay's once-a-second check (reconcile_desktop_keys)
+    check("its held key stays down on the desktop past a second", typed(), ["fullkb 1", "key 30 1"])
+    time.sleep(2.2)  # no hello for 3 s
+    check("it stops saying hello: its held key comes up", typed(), ["key 30 0"])
+    check("...logged", [m for m in LOG if m.startswith("Full Keyboard")][-1:],
+          ["Full Keyboard stopped (no word for 3 seconds)"])
+    from_kb("kbkey 30 1")
+    check("gone: its keys reach nothing until it says hello again", (typed(), emitted()), ([], []))
+    kb.close()
+    to_relay("keyboard steam")
     use(None)
     print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)
     shutil.rmtree(OUT, ignore_errors=True)

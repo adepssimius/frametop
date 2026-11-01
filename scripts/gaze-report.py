@@ -267,7 +267,7 @@ def check_install():
     venv = repo / "gaze/tracker/build/venv"
     done = venv / "requirements.done"
     req = repo / "gaze/tracker/requirements.txt"
-    if not (venv / "bin/python").exists():
+    if not os.path.lexists(venv / "bin/python"):  # a link to the container's Python (ft-gazed's venv_built)
         say("  gaze/tracker/build/venv (our tracker's Python): missing")
     else:
         same = done.is_file() and req.is_file() and done.read_bytes() == req.read_bytes()
@@ -310,7 +310,7 @@ def gaze_settings(repo):
     except OSError:
         pass
     setting = conf.get("GAZE_TRACKER", "auto").lower()
-    venv = (repo / "gaze/tracker/build/venv/bin/python").exists() if repo else False
+    venv = os.path.lexists(repo / "gaze/tracker/build/venv/bin/python") if repo else False
     installed = EYEGRAB_BIN.exists() and EYEGRAB_UNIT.exists() and venv
     tracker = setting if setting in ("own", "steam") else "own" if installed else "steam"
     return conf, setting, installed, tracker
@@ -356,6 +356,18 @@ def check_steam_tracker(worn, repo):
         elif "idle" in result and worn:
             find("The headset is worn, but SteamVR's eye tracker isn't writing eye-server.mmap: "
                  "see eyetracking.txt below (SteamVR restarts it with SteamVR)")
+        # The eye cameras' rate (gaze/eye-rate.py): at 15 fps our tracker can't calibrate.
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                uc.check_eye_rate()
+        except Exception as e:  # an update-check.py from before it
+            buf.write(f"update-check.py's eye camera check failed: {e}\n")
+        result = buf.getvalue().strip()
+        if result:
+            say(f"eye cameras (scripts/update-check.py): {result}")
+        if result.startswith(("FAIL", "warn")):
+            find("SteamVR's eye cameras: " + result.split(":", 1)[-1].strip())
 
     say("", "vrserver.txt, eye tracking (last 10):")
     entries = steam_log(LOGS / "vrserver.txt") or []

@@ -16,6 +16,7 @@
 //     uploads a new texture each time, left the panel blank for a moment on every change;
 //     it's only the fallback if the buffers can't be made.
 #include "keyboard.h"
+#include "rounded.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -236,19 +237,7 @@ void Layout() {
 
 // A rounded rectangle over what's there (straight alpha, like the other panels).
 void FillRounded(int x0, int y0, int x1, int y1, double radius, const uint8_t rgba[4]) {
-    for (int y = y0; y < y1; ++y)
-        for (int x = x0; x < x1; ++x) {
-            const double cx = std::clamp(x + 0.5, x0 + radius, x1 - radius);
-            const double cy = std::clamp(y + 0.5, y0 + radius, y1 - radius);
-            const double cover = std::clamp(radius - std::hypot(x + 0.5 - cx, y + 0.5 - cy) + 0.5, 0.0, 1.0);
-            if (cover <= 0) continue;
-            uint8_t *p = &g_px[(size_t(y) * kW + x) * 4];
-            const double a = rgba[3] / 255.0 * cover, below = p[3] / 255.0;
-            const double out = a + below * (1 - a);
-            for (int c = 0; c < 3; ++c)
-                p[c] = uint8_t(std::lround(out > 0 ? (rgba[c] * a + p[c] * below * (1 - a)) / out : 0));
-            p[3] = uint8_t(std::lround(out * 255));
-        }
+    rounded::Fill(g_px.data(), kW, x0, y0, x1, y1, radius, rgba);
 }
 
 // ---------------------------------------------------------------- buffers
@@ -553,6 +542,40 @@ void Destroy() {
     DropBuffers();
     g_overlay = vr::k_ulOverlayHandleInvalid;
     g_shown = false;
+}
+
+
+int LabelWidth(const char *text, int size) {
+    static bool tried = false;   // (the keyboard loads it too; once is enough either way)
+    if (!g_fontOk && !tried) tried = true, LoadFont();
+    if (!g_fontOk || !*text) return 0;
+    int width = 0;
+    for (uint32_t cp : Codepoints(text)) width += GetGlyph(cp, size).advance;
+    return width;
+}
+
+int DrawLabel(uint8_t *px, int w, int h, const char *text, int size, int cx, int cy, uint8_t alpha, const uint8_t rgb[3]) {
+    const int width = LabelWidth(text, size);
+    if (!width) return 0;
+    int ascent, descent, gap;
+    stbtt_GetFontVMetrics(&g_font, &ascent, &descent, &gap);
+    const float scale = stbtt_ScaleForPixelHeight(&g_font, float(size));
+    int x = cx - width / 2;
+    const int baseline = cy + int(std::lround((ascent + descent) * scale / 2));
+    for (uint32_t cp : Codepoints(text)) {
+        const Glyph &g = GetGlyph(cp, size);
+        for (int gy = 0; gy < g.h; ++gy)
+            for (int gx = 0; gx < g.w; ++gx) {
+                const int qx = x + g.xoff + gx, qy = baseline + g.yoff + gy;
+                if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+                const double a = g.bitmap[size_t(gy) * g.w + gx] / 255.0 * alpha / 255.0;
+                uint8_t *p = &px[(size_t(qy) * w + qx) * 4];
+                for (int c = 0; c < 3; ++c) p[c] = uint8_t(std::lround(p[c] + (rgb[c] - p[c]) * a));
+                p[3] = uint8_t(std::max<double>(p[3], 255 * a));
+            }
+        x += g.advance;
+    }
+    return width;
 }
 
 }  // namespace keyboard

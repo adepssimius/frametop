@@ -51,6 +51,16 @@ copy_tree() {
   cp -a "$source/session" "$release/session"
   cp -a "$source/scripts/in-box" "$source/scripts/container-up.sh" "$release/scripts/"
   cp -a "$source/input" "$release/input"
+  # The relay and settings import these from their pinned release, and the
+  # settings also invoke the companion scripts relative to that release.
+  for dir in commands models voice hands float frunner tour; do
+    if [ -d "$source/$dir" ]; then
+      mkdir -p "$release/$dir"
+      rsync -a --exclude build --exclude __pycache__ "$source/$dir/" "$release/$dir/"
+    fi
+  done
+  cp -a "$source/desktops.sh" "$release/desktops.sh"
+  cp -a "$source/scripts/." "$release/scripts/"
   # Settings desktop entries in this session must resolve inside the release.
   for dir in display-settings input-settings remote-displays steam; do
     [ ! -d "$source/$dir" ] || cp -a "$source/$dir" "$release/$dir"

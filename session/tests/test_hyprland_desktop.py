@@ -33,6 +33,9 @@ class HyprlandDesktopInstallTests(unittest.TestCase):
         _touch(root / "stage/config/quickshell/ii/shell.qml")
         _touch(root / "stage/theme/fonts/MaterialSymbolsRounded.ttf")
         _touch(root / "input/input-relay.py")
+        for path in ("commands/ft_commands.py", "hands/handsmode.py", "models/catalog.py",
+                     "voice/voice_settings.py", "desktops.sh"):
+            _touch(root / path)
         _touch(root / "scripts/in-box", exe=True)
         _touch(root / "scripts/container-up.sh", exe=True)
         _touch(root / "layout/ft-layout", exe=True)
@@ -72,7 +75,9 @@ class HyprlandDesktopInstallTests(unittest.TestCase):
             current = (pin / "current").resolve()
             self.assertTrue((current / "screens/build/ft-screens").is_file())
             for path in ("display-settings/ft-display-settings", "input-settings/ft-input-settings",
-                         "remote-displays/ft-remote-displays", "steam/steamui.py", "gaze/probe/ft-gazeprobe"):
+                         "remote-displays/ft-remote-displays", "steam/steamui.py", "gaze/probe/ft-gazeprobe",
+                         "commands/ft_commands.py", "hands/handsmode.py", "models/catalog.py",
+                         "voice/voice_settings.py", "desktops.sh"):
                 self.assertTrue((current / path).is_file(), path)
             self.assertTrue((current / "build/end4/bin/starship").is_file())
             self.assertTrue((current / "build/end4/lib64/libhyprlang.so.2").is_file())

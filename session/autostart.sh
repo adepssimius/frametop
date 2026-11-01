@@ -29,4 +29,11 @@ fi
 # The dashboard and its drivers come up just after the compositor.
 sleep 5
 echo "AUTOSTART is on: starting the desktop"
+if [ -x "$HOME/.local/bin/frametop-desktop" ]; then
+  # Respect the installed desktop selector, including an explicit Plasma
+  # fallback, instead of desktops.sh's Plasma-only start command.
+  selection=$(cat "$HOME/.config/frametop/desktop-selection" 2>/dev/null || echo hyprland)
+  case "$selection" in hyprland|plasma) ;; *) selection=hyprland ;; esac
+  exec "$HOME/.local/bin/frametop-desktop" use "$selection"
+fi
 exec "$here/../desktops.sh" start

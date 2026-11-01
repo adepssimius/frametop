@@ -5,11 +5,12 @@ here=$(dirname "$(readlink -f "$0")")
 # The official Tailscale tray needs the desktop's private D-Bus, so start it
 # here rather than on the user's systemd bus. It is optional and installed
 # independently of Frametop.
-if [ "${FT_NO_VR_SMOKE:-}" != 1 ] && [ -f "$HOME/.config/autostart/tailscale-systray.desktop" ]; then
-  if [ -x /run/host/var/lib/tailscale/bin/tailscale ]; then
-    setsid /run/host/var/lib/tailscale/bin/tailscale --socket=/run/host/run/tailscale/tailscaled.sock systray >/dev/null 2>&1 < /dev/null &
-  elif [ -x /var/lib/tailscale/bin/tailscale ]; then
-    setsid /var/lib/tailscale/bin/tailscale systray >/dev/null 2>&1 < /dev/null &
+if [ "${FT_NO_VR_SMOKE:-}" != 1 ] && [ -f "$HOME/.config/autostart/tailscale-systray.desktop" ] && \
+   [ -x "$HOME/.local/bin/tailscale" ]; then
+  if [ -S /run/host/run/tailscale/tailscaled.sock ]; then
+    setsid "$HOME/.local/bin/tailscale" --socket=/run/host/run/tailscale/tailscaled.sock systray >/dev/null 2>&1 < /dev/null &
+  else
+    setsid "$HOME/.local/bin/tailscale" systray >/dev/null 2>&1 < /dev/null &
   fi
 fi
 if command -v cliphist >/dev/null 2>&1 && command -v wl-paste >/dev/null 2>&1; then

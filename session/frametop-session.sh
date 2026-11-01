@@ -35,6 +35,7 @@ done
 
 conf=$HOME/.config/frametop.conf
 BACKEND=screens DESKTOP=plasma SCREENS=2 WIDTH=1920 HEIGHT=1080 PHYS_WIDTH=1.6 REMOTE=0 FLOAT_SLOTS=8 FLOAT_MARGIN=300
+NOTIFY_FORWARD=auto FIREFOX_TITLEBAR=kwin
 # shellcheck disable=SC1090
 [ -f "$conf" ] && . "$conf"
 backend=${FT_BACKEND:-$BACKEND}

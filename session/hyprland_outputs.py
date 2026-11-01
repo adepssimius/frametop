@@ -73,7 +73,14 @@ def step(live_names, state, screens, baseline):
         commands.append(("remove", name))
     for _ in range(actions["create"]):
         commands.append(("create", "wayland"))
+    by_slot = {int(screen["slot"]): screen for screen in layout.screens_by_slot(screens)}
     for name, slot in actions["claims"]:
+        screen = by_slot.get(int(slot))
+        if screen and (state.get("mapping") or {}).get(name) != screen["id"]:
+            width, height = int(screen["size"][0]), int(screen["size"][1])
+            metres = float(screen["metres"])
+            # A claim past the launch count is refused until the slot exists.
+            commands.append(("slot", f"slot {int(slot)} {width} {height} {metres:.3f}"))
         commands.append(("claim", f"claim {name} {slot}"))
     for rule in actions["monitors"]:
         if state.get("rules", {}).get(rule["monitor"]) == rule["eval"]:
@@ -126,35 +133,110 @@ def send_control(text, name=None):
         sock.close()
 
 
+def settle_baseline(baseline, live_count, enabled, short):
+    """Trust startup's output count, then take over if those outputs never appear.
+
+    The first polls do not create monitors the startup script already asked
+    for. If the live count stays below that for a few polls, the create did
+    not land and the poll creates the missing ones.
+    """
+    if live_count >= baseline:
+        return max(baseline, enabled), 0
+    short += 1
+    if short >= 3:
+        return live_count, 0
+    return baseline, short
+
+
+def monitor_for_slot(mapping, slot, screens=None):
+    """The live output whose stable id is hypr-<slot>."""
+    try:
+        number = int(slot)
+        want = next((s["id"] for s in layout.screens_by_slot(screens)
+                     if int(s["slot"]) == number), "") if screens is not None else f"hypr-{number}"
+    except (TypeError, ValueError):
+        return ""
+    for name, ident in (mapping or {}).items():
+        if ident == want and name:
+            return name
+    return ""
+
+
+def pointer_focus_eval(mapping, slot, current, screens=None):
+    """Lua that focuses the panel under the laser. Empty when nothing changed."""
+    if not slot:
+        return "", current or ""
+    name = monitor_for_slot(mapping, slot, screens)
+    if not name or name == current:
+        return "", current or ""
+    return f'hl.dispatch(hl.dsp.focus({{ monitor = "{name}" }}))', name
+
+
+def read_pointer_slot():
+    runtime = os.environ.get("FT_HOST_RUNTIME") or ""
+    control = os.environ.get("FT_HYPR_CONTROL") or os.environ.get("FT_HYPRLAND_CONTROL") or ""
+    if not runtime or not control or not control.replace("_", "").replace("-", "").isalnum():
+        return 0
+    path = Path(runtime) / f"frametop-pointer-{control}"
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def apply_commands(commands):
+    """Apply a poll in order; a failed control send retries on the next poll."""
+    for kind, arg in commands:
+        if kind == "create":
+            hyprctl(["output", "create", "wayland"])
+        elif kind == "remove":
+            hyprctl(["output", "remove", arg])
+        elif kind == "monitor":
+            hyprctl(["eval", arg])
+        elif kind in ("slot", "claim"):
+            if not send_control(arg):
+                raise RuntimeError(f"ft-screens did not receive {kind}")
+
+
 def main():
     baseline = int(os.environ.get("FT_HYPR_OUTPUTS") or os.environ.get("FT_SCREEN_COUNT") or "1")
+    short = 0
     state = load_state()
+    focused = ""
+    tick = 0
+    visibility_sent = False
+    screens = layout.load()
     while True:
         try:
+            expr, nxt = pointer_focus_eval(state.get("mapping") or {}, read_pointer_slot(), focused, screens)
+            if expr:
+                hyprctl(["eval", expr])
+            focused = nxt
+            if tick % 5 != 0:
+                tick += 1
+                time.sleep(0.2)
+                continue
+            tick += 1
             raw = hyprctl(["monitors", "-j"])
             live = monitors_from_json(raw)
             screens = layout.load()
             result = step(live, state, screens, baseline)
-            for kind, arg in result["commands"]:
-                if kind == "create":
-                    hyprctl(["output", "create", "wayland"])
-                elif kind == "remove":
-                    hyprctl(["output", "remove", arg])
-                elif kind == "monitor":
-                    hyprctl(["eval", arg])
-                elif kind == "claim":
-                    send_control(arg)
+            apply_commands(result["commands"])
             # New screens get their first pose from ft-screens (a row in front
             # of the headset). This loop does not send place: a poll must not
             # pull a panel back after the user moves it. Arrange does that.
             state = result["state"]
             state["placed"] = list(dict.fromkeys([*(state.get("placed") or []), *result["place_ids"]]))
             save_state(state)
-            if len(live) >= baseline:
-                baseline = max(baseline, len(screens.get("screens") or []))
+            if not visibility_sent and live:
+                for command in layout.visibility_commands(screens):
+                    send_control(command)
+                visibility_sent = True
+            baseline, short = settle_baseline(
+                baseline, len(live), len(screens.get("screens") or []), short)
         except Exception as exc:
             print(f"frametop: output sync: {exc}", file=sys.stderr)
-        time.sleep(1)
+        time.sleep(0.2)
 
 
 if __name__ == "__main__":

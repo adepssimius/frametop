@@ -158,6 +158,29 @@ SHELL_PATCHES = (
         "    renderType: Quickshell.env(\"FT_FRAME_SESSION\") ? Text.QtRendering : Text.NativeRendering\n",
     ),
     (
+        "quickshell/ii/modules/common/widgets/MaterialSymbol.qml",
+        "    // Qt's native text path on this container drops Material Symbol ligatures.\n"
+        "    renderType: Quickshell.env(\"FT_FRAME_SESSION\") ? Text.QtRendering : Text.NativeRendering\n"
+        "    font {\n"
+        "        hintingPreference: Font.PreferNoHinting\n"
+        "        family: Appearance?.font.family.iconMaterial ?? \"Material Symbols Rounded\"\n",
+        "    // Qt's native text path on this container drops Material Symbol ligatures.\n"
+        "    // The file path is the font next to the Frame theme, so a second shell\n"
+        "    // does not depend on fontconfig search order inside the container.\n"
+        "    FontLoader {\n"
+        "        id: materialSymbols\n"
+        "        source: {\n"
+        "            const path = Quickshell.env(\"FT_FRAME_FONT_MATERIAL\") || \"\"\n"
+        "            if (!path) return \"\"\n"
+        "            return \"file://\" + path.split(\"/\").map(part => encodeURIComponent(part)).join(\"/\")\n"
+        "        }\n"
+        "    }\n"
+        "    renderType: Quickshell.env(\"FT_FRAME_SESSION\") ? Text.QtRendering : Text.NativeRendering\n"
+        "    font {\n"
+        "        hintingPreference: Font.PreferNoHinting\n"
+        "        family: materialSymbols.status === FontLoader.Ready ? materialSymbols.name : (Appearance?.font.family.iconMaterial ?? \"Material Symbols Rounded\")\n",
+    ),
+    (
         "quickshell/ii/services/ai/ChatGptBridge.qml",
         "import QtQuick\nimport Quickshell.Io\n",
         "import QtQuick\nimport Quickshell\nimport Quickshell.Io\n",
@@ -289,7 +312,198 @@ SHELL_PATCHES = (
         '    frame_require_download "$downloadPath" || exit 1\n'
         'fi\n',
     ),
+    (
+        "quickshell/ii/modules/common/Config.qml",
+        '                property string wallpaperPath: ""\n'
+        '                property string thumbnailPath: ""\n'
+        '                property bool hideWhenFullscreen: true\n',
+        '                property string wallpaperPath: ""\n'
+        '                property string thumbnailPath: ""\n'
+        '                // Per-monitor images. Adapted from end-4/dots-hyprland pull 2245\n'
+        '                // by Sevilze (GPL-3.0-or-later). enable false keeps one image\n'
+        '                // on every monitor. Entries are {monitor, path, workspaceFirst,\n'
+        '                // workspaceLast}; on the Frame, monitor is the hypr-N id.\n'
+        '                property JsonObject multiMonitor: JsonObject {\n'
+        '                    property bool enable: false\n'
+        '                }\n'
+        '                property list<var> wallpapersByMonitor: []\n'
+        '                property bool hideWhenFullscreen: true\n',
+    ),
+    (
+        "quickshell/ii/modules/ii/background/Background.qml",
+        '        property bool wallpaperIsVideo: Config.options.background.wallpaperPath.endsWith(".mp4") || Config.options.background.wallpaperPath.endsWith(".webm") || Config.options.background.wallpaperPath.endsWith(".mkv") || Config.options.background.wallpaperPath.endsWith(".avi") || Config.options.background.wallpaperPath.endsWith(".mov")\n'
+        '        property string wallpaperPath: wallpaperIsVideo ? Config.options.background.thumbnailPath : Config.options.background.wallpaperPath\n',
+        '        // Wallpaper. Per-monitor data comes from WallpaperListener, which\n'
+        '        // resolves hypr-N through the output map (end-4 PR 2245, Sevilze).\n'
+        '        property var wallpaperData: {\n'
+        '            const name = monitor?.name || ""\n'
+        '            const found = name ? WallpaperListener.effectivePerMonitor[name] : null\n'
+        '            if (found && found.path) return found\n'
+        '            return { path: Config.options.background.wallpaperPath }\n'
+        '        }\n'
+        '        property string resolvedPath: wallpaperData.path || Config.options.background.wallpaperPath\n'
+        '        property bool wallpaperIsVideo: resolvedPath.endsWith(".mp4") || resolvedPath.endsWith(".webm") || resolvedPath.endsWith(".mkv") || resolvedPath.endsWith(".avi") || resolvedPath.endsWith(".mov")\n'
+        '        property string wallpaperPath: wallpaperIsVideo ? (wallpaperData.thumbnail || Config.options.background.thumbnailPath) : resolvedPath\n'
+        '        property int parallaxFirst: wallpaperData.workspaceFirst || 1\n'
+        '        property int parallaxLast: wallpaperData.workspaceLast || lastWorkspaceId\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        'set_wallpaper_path() {\n'
+        '    local path="$1"\n'
+        '    if [ -f "$SHELL_CONFIG_FILE" ]; then\n'
+        '        jq --arg path "$path" \'.background.wallpaperPath = $path\' "$SHELL_CONFIG_FILE" > "$SHELL_CONFIG_FILE.tmp" && mv "$SHELL_CONFIG_FILE.tmp" "$SHELL_CONFIG_FILE"\n'
+        '    fi\n'
+        '}\n',
+        'frame_wallpaper_key() {\n'
+        '    local monitor="$1"\n'
+        '    if [ -z "$monitor" ]; then\n'
+        '        echo ""\n'
+        '        return\n'
+        '    fi\n'
+        '    if [ -n "${FT_FRAME_SESSION:-}" ] && [ -f "$FT_FRAME_SESSION/wallpaper_identity.py" ]; then\n'
+        '        python3 "$FT_FRAME_SESSION/wallpaper_identity.py" key "$monitor"\n'
+        '        return\n'
+        '    fi\n'
+        '    printf \'%s\\n\' "$monitor"\n'
+        '}\n'
+        '\n'
+        'set_wallpaper_path() {\n'
+        '    local path="$1"\n'
+        '    local monitor="${2:-}"\n'
+        '    local start_workspace="${3:-1}"\n'
+        '    local end_workspace="${4:-10}"\n'
+        '    local thumbnail="${5:-}"\n'
+        '    if [ -f "$SHELL_CONFIG_FILE" ]; then\n'
+        '        if [ -n "$monitor" ]; then\n'
+        '            local key\n'
+        '            key=$(frame_wallpaper_key "$monitor")\n'
+        '            if [ -n "${FT_FRAME_SESSION:-}" ] && [ -f "$FT_FRAME_SESSION/wallpaper_identity.py" ]; then\n'
+        '                python3 "$FT_FRAME_SESSION/wallpaper_identity.py" set "$key" "$path" "$start_workspace" "$end_workspace" "$thumbnail"\n'
+        '            fi\n'
+        '            jq --arg name "$key" --arg path "$path" --argjson startWs "$start_workspace" --argjson endWs "$end_workspace" --arg thumb "$thumbnail" \'\n'
+        '                .background.wallpapersByMonitor = (\n'
+        '                    (.background.wallpapersByMonitor // [])\n'
+        '                    | map(select(.monitor != $name))\n'
+        '                    + [{monitor: $name, path: $path, workspaceFirst: $startWs, workspaceLast: $endWs, thumbnail: $thumb}]\n'
+        '                )\' "$SHELL_CONFIG_FILE" > "$SHELL_CONFIG_FILE.tmp" && mv "$SHELL_CONFIG_FILE.tmp" "$SHELL_CONFIG_FILE"\n'
+        '        else\n'
+        '            jq --arg path "$path" \'.background.wallpaperPath = $path\' "$SHELL_CONFIG_FILE" > "$SHELL_CONFIG_FILE.tmp" && mv "$SHELL_CONFIG_FILE.tmp" "$SHELL_CONFIG_FILE"\n'
+        '        fi\n'
+        '    fi\n'
+        '}\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        'kill_existing_mpvpaper() {\n'
+        '    pkill -f -9 mpvpaper || true\n'
+        '}\n',
+        'kill_existing_mpvpaper() {\n'
+        '    pkill -f -9 mpvpaper || true\n'
+        '}\n'
+        '\n'
+        'kill_mpvpaper() {\n'
+        '    local monitor="${1:-}"\n'
+        '    if [ -z "$monitor" ]; then\n'
+        '        kill_existing_mpvpaper\n'
+        '        return\n'
+        '    fi\n'
+        '    pkill -f -9 "mpvpaper .* ${monitor}( |$)" || true\n'
+        '}\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        '    color="$5"\n'
+        '\n'
+        '    # Start Gemini auto-categorization if enabled\n',
+        '    color="$5"\n'
+        '    target_monitor="${6:-}"\n'
+        '    start_workspace="${7:-}"\n'
+        '    end_workspace="${8:-}"\n'
+        '\n'
+        '    # Start Gemini auto-categorization if enabled\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        '        kill_existing_mpvpaper\n'
+        '\n'
+        '        if is_video "$imgpath"; then\n',
+        '        kill_mpvpaper "$target_monitor"\n'
+        '\n'
+        '        if is_video "$imgpath"; then\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        '    switch "$imgpath" "$mode_flag" "$type_flag" "$color_flag" "$color"\n',
+        '    switch "$imgpath" "$mode_flag" "$type_flag" "$color_flag" "$color" "$target_monitor" "$start_workspace" "$end_workspace"\n',
+    ),
+    (
+        "quickshell/ii/scripts/colors/switchwall.sh",
+        '            --image)\n'
+        '                imgpath="$2"\n'
+        '                shift 2\n'
+        '                ;;\n'
+        '            --noswitch)\n'
+        '                noswitch_flag="1"\n'
+        '                imgpath=$(jq -r \'.background.wallpaperPath\' "$SHELL_CONFIG_FILE" 2>/dev/null || echo "")\n'
+        '                shift\n'
+        '                ;;\n',
+        '            --image)\n'
+        '                imgpath="$2"\n'
+        '                shift 2\n'
+        '                ;;\n'
+        '            --monitor)\n'
+        '                target_monitor="$2"\n'
+        '                shift 2\n'
+        '                ;;\n'
+        '            --noswitch)\n'
+        '                noswitch_flag="1"\n'
+        '                if [ -n "$target_monitor" ]; then\n'
+        '                    local key\n'
+        '                    key=$(frame_wallpaper_key "$target_monitor")\n'
+        '                    imgpath=$(jq -r --arg mon "$key" \'(.background.wallpapersByMonitor // [] | map(select(.monitor == $mon)) | .[0].path) // .background.wallpaperPath\' "$SHELL_CONFIG_FILE" 2>/dev/null || echo "")\n'
+        '                else\n'
+        '                    imgpath=$(jq -r \'.background.wallpaperPath\' "$SHELL_CONFIG_FILE" 2>/dev/null || echo "")\n'
+        '                fi\n'
+        '                shift\n'
+                '                ;;\n',
+    ),
+    (
+        "quickshell/ii/modules/common/widgets/MaterialSymbol.qml",
+        "        variableAxes: { \n"
+        "            \"FILL\": truncatedFill,\n"
+        "            // \"wght\": font.weight,\n"
+        "            // \"GRAD\": 0,\n"
+        "            \"opsz\": iconSize,\n"
+        "        }\n",
+        "        // Variable axes drop the ligatures these icon names need.\n",
+    ),
 )
+
+
+def install_material_icons(dest: Path) -> list[str]:
+    """Icon names are codepoints. Qt on the Frame does not apply the ligatures."""
+    src = Path(__file__).resolve().parent / "frame-icons"
+    target = dest / "quickshell" / "ii" / "modules" / "common" / "widgets"
+    if not src.is_dir() or not target.is_dir():
+        return []
+    notes = []
+    for name in ("MaterialSymbol.qml", "material-glyphs.js"):
+        file = src / name
+        if file.is_file():
+            shutil.copy2(file, target / name)
+            notes.append(f"icon {name}")
+    return notes
+
+
+def install_wallpaper_listener(dest: Path) -> list[str]:
+    """The per-monitor resolver is ours; the laptop tree does not have it."""
+    src = Path(__file__).resolve().parent / "frame-wallpaper" / "WallpaperListener.qml"
+    target = dest / "quickshell" / "ii" / "services" / "WallpaperListener.qml"
+    if not src.is_file() or not target.parent.is_dir():
+        return []
+    shutil.copy2(src, target)
+    return [f"wallpaper {target.name}"]
 
 
 def apply_frame_patches(dest: Path) -> list[str]:
@@ -304,7 +518,26 @@ def apply_frame_patches(dest: Path) -> list[str]:
             continue
         path.write_text(text.replace(old, new), encoding="utf-8")
         notes.append(f"patch {rel}")
+    patch_session_processes(dest)
     return notes
+
+
+def patch_session_processes(dest: Path) -> None:
+    """Scope end-4 process signals to this session, including existing staged copies."""
+    # end-4's pkill matches wallpapers in every desktop. The staged shell
+    # must only stop clients belonging to its own isolated runtime.
+    wall = dest / "quickshell/ii/scripts/colors/switchwall.sh"
+    if wall.is_file():
+        text = wall.read_text(encoding="utf-8")
+        text = text.replace('pkill -f -9 "mpvpaper .* ${monitor}( |$)"',
+                            '"$FT_FRAME_SESSION/frame-stop-mpvpaper.py" "$monitor"')
+        text = text.replace('pkill -f -9 mpvpaper', '"$FT_FRAME_SESSION/frame-stop-mpvpaper.py"')
+        wall.write_text(text, encoding="utf-8")
+    terminal_colors = dest / "quickshell/ii/scripts/colors/applycolor.sh"
+    if terminal_colors.is_file():
+        text = terminal_colors.read_text(encoding="utf-8")
+        text = text.replace('kill -SIGUSR1 $(pidof kitty)', '"$FT_FRAME_SESSION/frame-reload-kitty.py"')
+        terminal_colors.write_text(text, encoding="utf-8")
 
 
 def copy_impulse(src: Path, dest: Path) -> list[str]:
@@ -329,6 +562,7 @@ def copy_theme_state(src: Path, dest: Path) -> list[str]:
         "states.json",
         "user/first_run.txt",
         "user/generated/colors.json",
+        "user/generated/terminal/kitty-theme.conf",
         "user/generated/wallpaper/category.txt",
         "user/generated/wallpaper/path.txt",
     )
@@ -390,6 +624,8 @@ def stage(hypr: Path, quickshell: Path, dest: Path, replace: bool,
     notes.extend(copy_tree(hypr, dest / "hypr"))
     notes.extend(copy_tree(quickshell, dest / "quickshell" / "ii"))
     notes.extend(apply_frame_patches(dest))
+    notes.extend(install_wallpaper_listener(dest))
+    notes.extend(install_material_icons(dest))
     if impulse is not None:
         notes.extend(copy_impulse(impulse, dest / "illogical-impulse"))
     theme = dest.parent / "theme"
@@ -404,6 +640,17 @@ def stage(hypr: Path, quickshell: Path, dest: Path, replace: bool,
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[0] in ("--patch-session-processes", "--prepare-session"):
+        dest = Path(argv[1])
+        if user_config_blocked(dest):
+            raise SystemExit(f"frametop: refusing to patch user config: {dest}")
+        if argv[0] == "--prepare-session":
+            apply_frame_patches(dest)
+            install_wallpaper_listener(dest)
+            install_material_icons(dest)
+        else:
+            patch_session_processes(dest)
+        return 0
     parser = argparse.ArgumentParser(description="Stage Hyprland and end-4 configs")
     parser.add_argument("--hypr", type=Path, required=True)
     parser.add_argument("--quickshell", type=Path, required=True)

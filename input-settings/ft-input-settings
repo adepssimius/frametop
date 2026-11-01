@@ -8,6 +8,14 @@ here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 wl=${WAYLAND_DISPLAY:-wayland-0}
 case $wl in /*) ;; *) wl="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$wl" ;; esac
 session_bus=${DBUS_SESSION_BUS_ADDRESS:-}
+# The launcher runs this inside the desktop's container. distrobox is not
+# there, so a second enter aborts and the window never opens.
+if [ -f /run/.containerenv ] || [ -f /.dockerenv ]; then
+  exec env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \
+    XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="$session_bus" \
+    QT_QPA_PLATFORM="wayland;xcb" \
+    python3 "$here/ft_input_settings.py" "$@"
+fi
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 exec "$here/../scripts/in-box" env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \

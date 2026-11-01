@@ -123,7 +123,10 @@ COMMAND = "command:"
 
 def profile_actions():
     """One action per profile (named layout), for buttons, controllers, and key combinations."""
-    names = sorted(read_json(LAYOUT_PATH).get("layouts", {}), key=str.casefold)
+    path = LAYOUT_PATH
+    if os.environ.get("FT_FRAME_SESSION"):
+        path = os.environ.get("FT_HYPRLAND_LAYOUT") or os.path.expanduser("~/.config/frametop/hyprland-layout.json")
+    names = sorted(read_json(path).get("layouts", {}), key=str.casefold)
     return [PROFILE + n for n in names]
 
 

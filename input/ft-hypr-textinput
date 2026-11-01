@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Report Hyprland text-input activation to the Frametop input relay.
+
+This is an input-method-v2 client, not a keyboard grab. It never commits text
+or reads surrounding text. Hyprland runs it in its isolated Wayland session;
+KWin keeps using ft-textinput and its input-method-v1 connection.
+"""
+import os
+import re
+import socket
+import struct
+import sys
+
+DISPLAY, REGISTRY, SYNC = range(1, 4)
+
+
+def string(value):
+    data = value.encode() + b"\0"
+    return struct.pack("=I", len(data)) + data + b"\0" * (-len(data) % 4)
+
+
+def read_string(data, offset):
+    length = struct.unpack_from("=I", data, offset)[0]
+    if not length or offset + 4 + length > len(data):
+        raise ValueError("invalid Wayland string")
+    return data[offset + 4:offset + 4 + length - 1].decode("utf-8", "replace")
+
+
+class TextInput:
+    def __init__(self, connection, report):
+        self.connection = connection
+        self.report = report
+        self.seat = None
+        self.manager = None
+        self.method = None
+        self.next_id = 4
+        self.bound = False
+        self.active = False
+        self.pending = None
+
+    def request(self, obj, opcode, payload=b""):
+        self.connection.sendall(struct.pack("=II", obj, (len(payload) + 8) << 16 | opcode) + payload)
+
+    def bind(self, global_name, interface, obj):
+        self.request(REGISTRY, 0, struct.pack("=I", global_name) + string(interface) + struct.pack("=II", 1, obj))
+
+    def allocate(self):
+        obj = self.next_id
+        self.next_id += 1
+        return obj
+
+    def event(self, obj, opcode, data):
+        if obj == DISPLAY and opcode == 0:
+            raise RuntimeError("Wayland compositor reported an error")
+        if obj == REGISTRY and opcode == 0:
+            name = struct.unpack_from("=I", data)[0]
+            interface = read_string(data, 4)
+            if interface == "wl_seat" and not self.seat:
+                self.seat = self.allocate()
+                self.bind(name, interface, self.seat)
+            elif interface == "zwp_input_method_manager_v2" and not self.manager:
+                self.manager = self.allocate()
+                self.bind(name, interface, self.manager)
+            if self.seat and self.manager and not self.bound:
+                self.method = self.allocate()
+                self.request(self.manager, 0, struct.pack("=II", self.seat, self.method))
+                self.bound = True
+        elif obj == SYNC and opcode == 0 and not self.bound:
+            raise RuntimeError("Hyprland did not offer input-method-v2 and a seat")
+        elif obj == self.method:
+            if opcode == 0:
+                self.pending = True
+            elif opcode == 1:
+                self.pending = False
+            elif opcode == 5 and self.pending is not None:
+                if self.active != self.pending:
+                    self.active = self.pending
+                    self.report(self.active)
+                self.pending = None
+            elif opcode == 6:
+                raise RuntimeError("another input method owns this seat")
+
+    def run(self):
+        self.request(DISPLAY, 1, struct.pack("=I", REGISTRY))
+        self.request(DISPLAY, 0, struct.pack("=I", SYNC))
+        buf = b""
+        try:
+            while True:
+                part = self.connection.recv(65536)
+                if not part:
+                    return
+                buf += part
+                while len(buf) >= 8:
+                    obj, word = struct.unpack_from("=II", buf)
+                    size, opcode = word >> 16, word & 0xffff
+                    if size < 8 or size % 4:
+                        raise ValueError("invalid Wayland message")
+                    if len(buf) < size:
+                        break
+                    self.event(obj, opcode, buf[8:size])
+                    buf = buf[size:]
+        finally:
+            if self.active:
+                self.report(False)
+
+
+def main():
+    display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+    path = display if os.path.isabs(display) else os.path.join(os.environ["XDG_RUNTIME_DIR"], display)
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    relay = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK)
+    conn.connect(path)
+    relay_name = os.environ.get("FT_TEXTINPUT_RELAY", "frametop_relay")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", relay_name):
+        raise ValueError("invalid relay name")
+
+    def report(active):
+        try:
+            relay.sendto(f"textfield {int(active)}".encode(), b"\0" + relay_name.encode())
+        except OSError:
+            pass
+
+    TextInput(conn, report).run()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        print(f"ft-hypr-textinput: {exc}", file=sys.stderr)
+        raise SystemExit(1)

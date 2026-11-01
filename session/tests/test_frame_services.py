@@ -62,11 +62,15 @@ class FrameServiceTests(unittest.TestCase):
             colors.write_text('{"surface": "#112233", "on_surface": "#eeeeee", "primary": "#abcdef"}\n')
             config = Path(temp) / "config"
             data = Path(temp) / "data"
+            config.mkdir()
+            (config / "kdeglobals").write_text("[General]\nUserSetting=keep\n")
             module.write_theme(colors, config, data)
             scheme = (data / "color-schemes" / "FrametopEnd4.colors").read_text()
             self.assertIn("BackgroundNormal=17,34,51", scheme)
             kdeglobals = (config / "kdeglobals").read_text()
             self.assertIn("ColorScheme=FrametopEnd4", kdeglobals)
+            self.assertIn("UserSetting=keep", kdeglobals)
+            self.assertIn("[Colors:Window]\nBackgroundNormal=17,34,51", kdeglobals)
             self.assertIn("Show Preview=true", kdeglobals)
             self.assertIn("View Style=8", kdeglobals)
             self.assertRegex(kdeglobals, r"ColorSchemeHash=[0-9a-f]{40}")

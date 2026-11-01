@@ -18,6 +18,7 @@ pin=$home/.local/share/frametop/hyprland-desktop
 plasma_session=${FT_PLASMA_SESSION:-$home/frametop-api/session/frametop-session.sh}
 apps=$home/.local/share/applications
 rollback=$pin/rollback/latest
+previous_release=$(readlink -f "$pin/current" 2>/dev/null || true)
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
 
@@ -50,7 +51,26 @@ copy_tree() {
   cp -a "$source/session" "$release/session"
   cp -a "$source/scripts/in-box" "$source/scripts/container-up.sh" "$release/scripts/"
   cp -a "$source/input" "$release/input"
+  # Settings desktop entries in this session must resolve inside the release.
+  for dir in display-settings input-settings remote-displays steam; do
+    [ ! -d "$source/$dir" ] || cp -a "$source/$dir" "$release/$dir"
+  done
+  if [ -d "$source/gaze/probe" ]; then
+    mkdir -p "$release/gaze"
+    cp -a "$source/gaze/probe" "$release/gaze/"
+  fi
+  mkdir -p "$release/layout"
+  cp -a "$source/layout/ft-layout" "$source/layout/ft_layout.py" \
+    "$source/layout/ft-hide-show" "$source/layout/ft-layout-reset" "$release/layout/"
+  chmod 755 "$release/layout/ft-layout" "$release/layout/ft-hide-show" "$release/layout/ft-layout-reset"
   cp -a "$source/screens/build/ft-screens" "$release/screens/build/ft-screens"
+  if [ -d "$source/build/end4/bin" ]; then
+    mkdir -p "$release/build/end4"
+    cp -a "$source/build/end4/bin" "$release/build/end4/"
+    if [ -d "$source/build/end4/lib64" ]; then
+      cp -a "$source/build/end4/lib64" "$release/build/end4/"
+    fi
+  fi
   if [ -d "$source/build/aquamarine/lib64" ]; then
     cp -a "$source/build/aquamarine/lib64" "$release/build/aquamarine-lib"
     mkdir -p "$release/build/aquamarine"
@@ -143,6 +163,13 @@ install_entries() {
   sed "s|@PLASMA_LAUNCHER@|$home/.local/bin/frametop-plasma|" \
     "$release/session/plasma-desktop.desktop" > "$apps/frametop-plasma-desktop.desktop"
   printf '%s\n' hyprland > "$home/.config/frametop/desktop-selection"
+  # SteamVR's launch bar still starts these by name. Point them at this
+  # release so Hide/Show Screens talks to the Hyprland compositor.
+  for f in ft-screens-toggle ft-layout-reset; do
+    if [ -f "$source/display-settings/$f.desktop" ]; then
+      sed "s|@REPO@|$release|" "$source/display-settings/$f.desktop" > "$apps/$f.desktop"
+    fi
+  done
 }
 
 install_relay() {
@@ -164,8 +191,8 @@ else:
     rules = {}
 if not isinstance(rules, dict):
     raise SystemExit("frametop: input rules are not an object")
-rules["controller_chords"] = profile["controller_chords"]
-rules["controller_in_games"] = False
+rules.setdefault("controller_chords", profile["controller_chords"])
+rules.setdefault("controller_in_games", False)
 rules_path.parent.mkdir(parents=True, exist_ok=True)
 rules_path.write_text(json.dumps(rules, indent=2) + "\n", encoding="utf-8")
 PY
@@ -207,6 +234,12 @@ if [ "${fds_before:-0}" != 0 ] && [ "${fds_after:-0}" = 0 ]; then
   echo "frametop: relay restart dropped the fd store ($fds_before -> 0); restoring" >&2
   "$rollback/restore.sh" || true
   exit 1
+fi
+# Stop the old release by its own path before starting the new one. Its
+# cleanup matches that path and must run before the new compositor exists.
+if [ -n "$previous_release" ] && [ "$previous_release" != "$release" ] &&
+   [ -x "$previous_release/session/desktop-stop.sh" ]; then
+  "$previous_release/session/desktop-stop.sh" || true
 fi
 "$pin/current/session/desktop-stop.sh" || true
 sleep 1

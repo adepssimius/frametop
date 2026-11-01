@@ -28,11 +28,24 @@ class HyprlandDesktopInstallTests(unittest.TestCase):
             (session / name).write_text((ROOT / "session" / name).read_text())
         _touch(root / "screens/build/ft-screens", exe=True)
         _touch(root / "build/aquamarine/lib64/libaquamarine.so.14")
+        _touch(root / "build/end4/bin/starship", exe=True)
+        _touch(root / "build/end4/lib64/libhyprlang.so.2")
         _touch(root / "stage/config/quickshell/ii/shell.qml")
         _touch(root / "stage/theme/fonts/MaterialSymbolsRounded.ttf")
         _touch(root / "input/input-relay.py")
         _touch(root / "scripts/in-box", exe=True)
         _touch(root / "scripts/container-up.sh", exe=True)
+        _touch(root / "layout/ft-layout", exe=True)
+        _touch(root / "layout/ft_layout.py")
+        _touch(root / "layout/ft-hide-show", exe=True)
+        _touch(root / "layout/ft-layout-reset", exe=True)
+        _touch(root / "display-settings/ft-display-settings", exe=True)
+        _touch(root / "input-settings/ft-input-settings", exe=True)
+        _touch(root / "remote-displays/ft-remote-displays", exe=True)
+        _touch(root / "steam/steamui.py")
+        _touch(root / "gaze/probe/ft-gazeprobe", exe=True)
+        _touch(root / "display-settings/ft-screens-toggle.desktop")
+        _touch(root / "display-settings/ft-layout-reset.desktop")
 
     def test_offline_install_pins_a_release_and_keeps_plasma_separate(self):
         import tempfile
@@ -58,6 +71,11 @@ class HyprlandDesktopInstallTests(unittest.TestCase):
             pin = home / ".local/share/frametop/hyprland-desktop"
             current = (pin / "current").resolve()
             self.assertTrue((current / "screens/build/ft-screens").is_file())
+            for path in ("display-settings/ft-display-settings", "input-settings/ft-input-settings",
+                         "remote-displays/ft-remote-displays", "steam/steamui.py", "gaze/probe/ft-gazeprobe"):
+                self.assertTrue((current / path).is_file(), path)
+            self.assertTrue((current / "build/end4/bin/starship").is_file())
+            self.assertTrue((current / "build/end4/lib64/libhyprlang.so.2").is_file())
             self.assertIn("commit=unversioned", (current / "VERSION").read_text())
             self.assertTrue((pin / "config/quickshell/ii/shell.qml").is_file())
             self.assertTrue((pin / "theme/fonts/MaterialSymbolsRounded.ttf").is_file())

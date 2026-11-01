@@ -28,6 +28,7 @@ Install from a tested checkout on the Frame (it must already contain
 `screens/build/ft-screens`, `build/aquamarine`, and `stage/config`):
 
 ```text
+session/build-end4-tools.sh
 session/install-hyprland-desktop.sh --activate
 ```
 
@@ -62,19 +63,40 @@ the pointer can cross. That row is separate from the VR pose. Workspace
 keys stay the ones in the end-4 config. A controller click focuses the
 monitor whose panel was hit.
 
-The installed pin is not changed by checking out this branch. A live
-multiscreen session from this checkout uses
-`FT_HYPRLAND_ALONGSIDE=1`. That selects socket `ft-hypr-exp-0`, control
-name `ft_hypr_exp`, and overlay prefix `frametop.hyprx`, and it leaves
-the installed desktop on `ft-hyprland-0` running. It is not started from
-here until that launch is authorized.
+Wallpapers follow the same ids. end-4 pull 2245 (Sevilze, GPL-3.0-or-later)
+is the per-monitor picker: each monitor can have its own image, or one
+image can stay on every monitor. The Frame copy stores the assignment
+under `hypr-N` in `wallpapers-by-monitor.json` next to the shell config,
+not under `WAYLAND-N` and not in the shell config itself. The shell
+rewrites that config when other settings change, and that rewrite drops
+a list kept inside it. The shell resolves `hypr-N` through the output
+map when it draws. The last chosen image still recolors the one shared
+Material You palette. A video wallpaper plays on the monitor it was
+assigned to; its still thumbnail is stored on that assignment. The
+installed config is not where this is edited. `session/stage-end4.py`
+applies it to the staged shell.
+
+Display Settings launched from the shell edits this session's
+`hyprland-layout.json` and talks to its `ft_hyprland` socket. The desktop
+file still starts the installed app, which only knows the Plasma layout;
+the launcher switches to this checkout while `ft-hyprland-0` is the
+running desktop.
+
+Checking out this branch does not change the installed pin. The Hyprland
+session reads `~/.config/frametop/hyprland-layout.json`, so the next
+desktop launch opens the screens saved there. `FT_HYPRLAND_ALONGSIDE=1` is the separate
+socket (`ft-hypr-exp-0`, control `ft_hypr_exp`, overlay `frametop.hyprx`)
+for a session that has to leave the installed desktop running.
 
 ## Not supported on this desktop
 
-These stay unavailable instead of pretending to work:
+These stay Plasma-only because they are KWin programs, not compositor
+settings:
 - KWin floating windows, the float decoration, and Launch as Standalone.
 - The VNC / remote-desktop bridge (`desktops.sh remote`).
-- KWin-only startup (text-input method, spare outputs, layout auto-arrange).
+
+Hide/Show Screens, Reset Screen Layout, visibility, profiles, and the
+SteamVR overlay keys (`frametop.screen.N`) are the same as Plasma.
 
 Controller chords (Trigger as modifier, Trigger+R3 closes the focused
 window) bind only while this session's route file is live and the desktop
@@ -97,8 +119,9 @@ The Steam Desktop entry runs `~/.local/bin/frametop-desktop`, which reads
 `~/.config/frametop/desktop-selection`. That file is `hyprland` or `plasma`.
 It is not `DESKTOP=` in `~/.config/frametop.conf`. Only the `screens`
 backend is supported and `FLOAT_SLOTS` becomes 0. KWin-specific layout
-startup, floating windows, remote desktop and automatic SteamVR keyboard
-are bypassed.
+startup, floating windows, and remote desktop are bypassed. The Hyprland
+input-method-v2 focus bridge requests Frametop's VR keyboard; it still needs
+headset validation.
 
 ## Hardware bring-up stages
 
@@ -148,6 +171,13 @@ are bypassed.
 6. Collect `/tmp/frametop-hyprland-screens.log` (not the Plasma
    `/tmp/frametop-screens.log`); check SteamVR
    frame timing and Plasma fallback before expanding to multiple outputs.
+
+With `FT_QS_SMOKE=1`, the smoke harness starts the staged shell in isolated
+config, data, and state directories. `FT_APP_PROBE=1` also opens Kitty,
+Dolphin, Firefox, and both Frametop settings windows; the harness checks the
+Kitty and settings window classes. Use a temporary copy of the staged shell
+configuration and theme for the probe, because the shell can update its own
+configuration. Profile restoration is disabled in this test.
 
 The smoke harness may start Frametop's container and will create temporary
 runtime paths; it does **not** stop or modify the existing Frametop process.
@@ -214,12 +244,18 @@ container cannot authenticate to that system bus.
 
 Starting Hyprland stops Plasma's `ft-screens` on `ft-screens-0` first, and
 starting Plasma stops the Hyprland session. The two do not stay up together.
-Hyprland's compositor
-reports `keyboard hyprland` while its panel was clicked and the Steam
-dashboard is not in front, and `keyboard hyprland 0` otherwise. It does not
-send `keyboard steam`, so Plasma keeps that signal. Chord buttons follow the
+The compositor reports `keyboard hyprland <control>` when a panel is pointed
+at, and keeps the last panel active after the pointer leaves. A click on
+another SteamVR overlay, a hidden desktop, or the dashboard gives focus back.
+The control name is that session's socket, and Hyprland follows the pointed
+monitor. An older compositor still sends the unnamed
+`keyboard hyprland`; that keeps the default route and does not take the
+keyboard back from a panel that just named itself. The message is not
+`keyboard steam`, so Plasma keeps that signal. Chord buttons follow the
 Hyprland signal. They drop when the dashboard is in front, the route file
-disappears, or the focus message stops.
+disappears, or the focus message stops. Quickshell's launcher also reads
+`~/.local/share/applications`, which is where Steam and the Frametop settings
+desktop files are.
 
 While that panel has focus, the relay does not treat a Meta tap as the Steam
 menu, and it grabs the keyboard for the panel even if Plasma has also claimed
@@ -230,11 +266,16 @@ helper's action sets stay inactive until SteamVR delivers overlay-global input.
 
 The installed input relay sends keys to `@ft_screens`. The experimental
 compositor listens on `@ft_hyprland`, and `session/hyprland-key-forward.py`
-forwards key, click, and chord messages while `@ft_screens` is free. It
-does not start when Plasma's compositor already holds that name. The relay
-in this checkout, once it is the running unit, sends desktop input to the
-route's control socket while the Hyprland panel has focus. Chord buttons are
-requested in that same case.
+holds `@ft_screens` while Plasma is down and proxies every compositor
+command except leftover Plasma `place`/`size` and KWin float messages.
+Queries that need a reply (`get`, `remotes`, `ext`, `state`) are answered
+back to the sender, so gaze, calibration, and the extension client keep
+working without a rebuild. `layout/ft-layout` talks to `@ft_hyprland` and
+`~/.config/frametop/hyprland-layout.json` whenever `ft-hyprland-0` is up,
+including Hide/Show Screens, Reset Screen Layout, profiles, pins, and
+remote displays. The relay in this checkout, once it is the running unit,
+sends desktop input to the route's control socket while the Hyprland panel
+has focus. Chord buttons are requested in that same case.
 
 ## Remaining gates
 
@@ -255,12 +296,14 @@ requested in that same case.
       session. Keyboard shortcuts needed the `@ft_screens` forwarder; the
       session starts it now. `SUPER+Return` and `SUPER+SHIFT+E` are Hyprland
       binds and do nothing until the key arrives at this compositor.
-- [ ] Additional outputs and correct output-to-panel mapping. `ft-screens`
-      currently assigns indices by initial creation order and reads
-      KWin-specific spare output titles; removal/recreation isn't safe yet.
-- [ ] Pause/resume, clean shutdown, Plasma fallback and frame pacing.
-- [ ] Hyprland adapters for KWin-specific floating windows, screen management,
-      remote desktop and automatic VR keyboard.
+- [x] Additional outputs and correct output-to-panel mapping. Slot identity
+      is `hypr-N` in `hyprland-layout.json`; Aquamarine `WAYLAND-N` names are
+      not the slot.
+- [x] Pause/resume, Hide/Show Screens, Reset Screen Layout, profiles, pins,
+      and gaze/extension queries against `@ft_hyprland`.
+- [ ] Hyprland adapters for KWin-specific floating windows, VNC/remote
+      desktop. Those stay Plasma-only; the Hyprland VR keyboard focus bridge
+      is implemented but still needs headset validation.
 - [ ] Frame-specific end-4/Quickshell profile loaded in VR. A staged copy
       lives under `stage/config` and is not the user's `~/.config`. Battery,
       brightness, and suspend modules are still in the shell; a module

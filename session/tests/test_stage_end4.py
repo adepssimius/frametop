@@ -13,6 +13,23 @@ _spec.loader.exec_module(stage_end4)
 
 
 class StageEnd4Tests(unittest.TestCase):
+    def test_existing_shell_process_signals_are_scoped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            colors = root / "quickshell/ii/scripts/colors"
+            colors.mkdir(parents=True)
+            wall = colors / "switchwall.sh"
+            wall.write_text('pkill -f -9 mpvpaper\npkill -f -9 "mpvpaper .* ${monitor}( |$)"\n')
+            terminal = colors / "applycolor.sh"
+            terminal.write_text('kill -SIGUSR1 $(pidof kitty)\n')
+            stage_end4.patch_session_processes(root)
+            self.assertNotIn("pkill", wall.read_text())
+            self.assertIn('frame-stop-mpvpaper.py" "$monitor"', wall.read_text())
+            self.assertIn("frame-reload-kitty.py", terminal.read_text())
+            before = (wall.read_text(), terminal.read_text())
+            stage_end4.patch_session_processes(root)
+            self.assertEqual(before, (wall.read_text(), terminal.read_text()))
+
     def test_copy_keeps_internal_links_and_skips_secrets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

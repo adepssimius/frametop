@@ -130,9 +130,13 @@ for p in $(pgrep -x plasmashell); do
     printf "the desktop's %s: %s\n" $v "$(echo "$env" | sed -n "s/^$v=//p" | grep . || echo unset)"
   done
 done
-echo "ft-screens debug: $(ask ft_screens debug)"
-echo "ft-screens state (mode, manual, wrist, gesture hand and angle, lasers, game, in games): $(ask ft_screens state)"
-echo "ft-screens pause: $(ask ft_screens 'pause state'), concealed: $(ask ft_screens concealed)"
+control=ft_screens
+if [ -S /run/user/$(id -u)/ft-hyprland-0 ]; then
+  control=${FT_HYPRLAND_CONTROL:-ft_hyprland}
+fi
+echo "ft-screens debug: $(ask $control debug)"
+echo "ft-screens state (mode, manual, wrist, gesture hand and angle, lasers, game, in games): $(ask $control state)"
+echo "ft-screens pause: $(ask $control 'pause state'), concealed: $(ask $control concealed)"
 echo "SteamVR overlays shown now:"
 XDG_CONFIG_HOME=$HOME/.config LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 timeout 10 \
   /opt/steamvr/bin/linuxarm64/vrcmd --overlays 2>/dev/null |
@@ -170,7 +174,8 @@ printf '\n===== Watched for %s s from %s\n' "$seconds" "$(date '+%F %T')"
 since=$(date '+%F %T')
 start=$(wc -l < /tmp/frametop-screens.log 2>/dev/null || echo 0)
 python3 -I - "$seconds" <<'PY'
-import socket, sys, time
+import os, socket, sys, time
+name = "ft_hyprland" if os.path.exists(f"/run/user/{os.getuid()}/ft-hyprland-0") else "ft_screens"
 s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 s.bind("")
 s.settimeout(1)
@@ -178,7 +183,7 @@ end, last = time.monotonic() + float(sys.argv[1]), None
 print("ft-screens' debug line whenever it changed:")
 while time.monotonic() < end:
     try:
-        s.sendto(b"debug", "\0ft_screens")
+        s.sendto(b"debug", "\0" + name)
         line = s.recv(4096).decode()
     except OSError as e:
         line = f"no answer ({e})"

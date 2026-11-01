@@ -196,13 +196,6 @@ Kirigami.ApplicationWindow {
                 }
             ]
 
-            header: Kirigami.InlineMessage {
-                position: Kirigami.InlineMessage.Position.Header
-                visible: backend.limitations.length > 0
-                type: Kirigami.MessageType.Warning
-                text: backend.limitations.join(" ")
-            }
-
             ColumnLayout {
                 spacing: Kirigami.Units.largeSpacing
 

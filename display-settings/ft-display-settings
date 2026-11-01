@@ -8,9 +8,44 @@ here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 wl=${WAYLAND_DISPLAY:-wayland-0}
 case $wl in /*) ;; *) wl="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$wl" ;; esac
 session_bus=${DBUS_SESSION_BUS_ADDRESS:-}
+# The installed copy of this app only knows the Plasma layout. When the
+# Hyprland desktop is up, run the checkout that owns that session.
+host_runtime=/run/user/$(id -u)
+app=$here/ft_display_settings.py
+hypr_control=
+if [ -S "$host_runtime/ft-hyprland-0" ]; then
+  hypr_control=ft_hyprland
+  route=$host_runtime/frametop-hyprland.route
+  if [ -f "$route" ]; then
+    got=$(sed -n 's/^control=//p' "$route" | head -n 1)
+    [ -n "$got" ] && hypr_control=$got
+    config_home=$(sed -n 's/^config_home=//p' "$route" | head -n 1)
+    if [ -n "${config_home:-}" ]; then
+      repo=$(cd "$config_home/../.." 2>/dev/null && pwd || true)
+      if [ -n "$repo" ] && [ -f "$repo/session/hyprland_layout.py" ] && [ -f "$repo/display-settings/ft_display_settings.py" ]; then
+        app=$repo/display-settings/ft_display_settings.py
+      fi
+    fi
+  fi
+fi
+# The launcher runs this inside the desktop's container. distrobox is not
+# there, so a second enter aborts and the window never opens.
+if [ -f /run/.containerenv ] || [ -f /.dockerenv ]; then
+  if [ -n "$hypr_control" ]; then
+    export FT_DISPLAY_COMPOSITOR=hyprland
+    export FT_HYPRLAND_CONTROL=$hypr_control
+    export FT_HYPRLAND_SOCKET=ft-hyprland-0
+  fi
+  exec env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \
+    XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="$session_bus" \
+    QT_QPA_PLATFORM="wayland;xcb" \
+    ${hypr_control:+FT_DISPLAY_COMPOSITOR=hyprland FT_HYPRLAND_CONTROL="$hypr_control" FT_HYPRLAND_SOCKET=ft-hyprland-0} \
+    python3 "$app" "$@"
+fi
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 exec "$here/../scripts/in-box" env WAYLAND_DISPLAY="$wl" DISPLAY="${DISPLAY:-}" \
   XAUTHORITY="${XAUTHORITY:-}" DBUS_SESSION_BUS_ADDRESS="$session_bus" \
   QT_QPA_PLATFORM="wayland;xcb" \
-  python3 "$here/ft_display_settings.py" "$@"
+  ${hypr_control:+FT_DISPLAY_COMPOSITOR=hyprland FT_HYPRLAND_CONTROL="$hypr_control" FT_HYPRLAND_SOCKET=ft-hyprland-0} \
+  python3 "$app" "$@"

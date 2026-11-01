@@ -159,7 +159,7 @@ Frametop Display Settings has four tabs (three with the gamescope backend, which
 - Visibility & pins: the visibility, game, and controller settings described above, the wrist angle, where each screen is pinned (in the room, a wrist, or your head), and buttons to pin all screens or unpin them.
 - Power: when the displays turn off while the headset isn't used, their state now, Turn displays off now (to try it), and Stay awake while plugged in. See [Displays off and sleep](#displays-off-and-sleep).
 
-`layout/ft-layout` does the arranging. It's a Python script that uses only the standard library and runs on the host:
+`layout/ft-layout` does the arranging. It's a Python script that uses only the standard library and runs on the host. When the Hyprland desktop is up it reads and writes `~/.config/frametop/hyprland-layout.json` and talks to `@ft_hyprland`; Plasma's `~/.config/frametop-layout.json` stays untouched:
 
 ```
 layout/ft-layout apply      # arrange every screen

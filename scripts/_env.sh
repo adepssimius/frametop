@@ -30,7 +30,8 @@ else
   # Agent and IDE shells often inherit gpg-agent's socket while the keys are loaded
   # into keychain's ssh-agent at login. Use keychain's when the current one has no keys.
   if ! ssh-add -l >/dev/null 2>&1; then
-    kc="$HOME/.keychain/$(hostname)-sh"
+    machine=$(hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || true)
+    kc="$HOME/.keychain/${machine}-sh"
     # shellcheck disable=SC1090
     [ -f "$kc" ] && . "$kc" >/dev/null
   fi

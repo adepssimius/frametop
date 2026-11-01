@@ -485,7 +485,8 @@ std::string ExeDir() {
 // machine's display (frametop.remote.N), a floating window (frametop.float.N), or a floating
 // window's popup (frametop.float.N.sub.K), not a control of theirs.
 bool FramePanel(const std::string &key) {
-    for (const char *prefix : {"frametop.screen.", "frametop.remote.", "frametop.float."}) {
+    for (const char *prefix : {"frametop.screen.", "frametop.hypr.", "frametop.hyprx.",
+                               "frametop.remote.", "frametop.float."}) {
         if (key.rfind(prefix, 0) != 0) continue;
         const std::string rest = key.substr(std::strlen(prefix));
         const size_t dot = rest.find('.');
@@ -500,6 +501,12 @@ void SendTo(int fd, const char *name, const std::string &msg) {
     std::memcpy(addr.sun_path + 1, name, std::strlen(name));
     const socklen_t len = offsetof(sockaddr_un, sun_path) + 1 + std::strlen(name);
     sendto(fd, msg.data(), msg.size(), 0, reinterpret_cast<sockaddr *>(&addr), len);
+}
+
+void SendToCompositor(int fd, const std::string &msg) {
+    SendTo(fd, "ft_screens", msg);
+    SendTo(fd, "ft_hyprland", msg);
+    SendTo(fd, "ft_hypr_exp", msg);
 }
 
 // JSON string literal (names come from other apps).
@@ -1071,7 +1078,7 @@ int main() {
     auto pressLeft = [&] {
         // ft-screens sends the keyboard to the panel clicked last; it sees clicks on
         // its own screens, but only we know when one lands on another panel.
-        SendTo(out, "ft_screens", "click " + (lastHit.empty() ? std::string("-") : lastHit));
+        SendToCompositor(out, "click " + (lastHit.empty() ? std::string("-") : lastHit));
         // A click after nudging the gaze-placed pointer: the nudge is a lesson, or past
         // POINTER_GAZE_NUDGE_MAX, a quick check (see the top).
         if (gazeOn && nudging && !gazeOwns && havePoint && Clock::now() - nudgeAt < std::chrono::seconds(10) &&
@@ -1116,7 +1123,7 @@ int main() {
         SendTo(out, "ft_pointer", "btn " + heldButton + " 0");
         // ft-screens releases a button held on its screens in KWin even when SteamVR hands
         // the release to some other overlay (its catcher usually gets it; this is the backstop).
-        SendTo(out, "ft_screens", "up");
+        SendToCompositor(out, "up");
         if (gazeBack) gazeOwns = true, gazeBack = false;
     };
     // The left button, from the relay's "btn trigger", with gaze mode's held-back press (see

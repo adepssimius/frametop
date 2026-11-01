@@ -39,7 +39,7 @@ import threading
 import urllib.request
 import uuid
 
-from PySide6.QtCore import Property, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QObject, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -51,6 +51,20 @@ import ft_layout  # noqa: E402
 
 FT_LAYOUT = os.path.join(LAYOUT_DIR, "ft-layout")
 FT_SCREENS = "\0ft_screens"
+
+
+def compositor_addr():
+    """The desktop that is up. Hyprland's compositor answers on its own socket."""
+    runtime = f"/run/user/{os.getuid()}"
+    if os.path.exists(os.path.join(runtime, "ft-hyprland-0")):
+        return b"\0" + os.environ.get("FT_HYPRLAND_CONTROL", "ft_hyprland").encode()
+    return FT_SCREENS
+
+
+def desktop_socket_up():
+    runtime = f"/run/user/{os.getuid()}"
+    return os.path.exists(os.path.join(runtime, "ft-hyprland-0")) or os.path.exists(
+        os.path.join(runtime, "frametop", "wayland-0"))
 TOKEN_DIR = os.path.expanduser("~/.local/share/frametop-stream/hosts")  # each host's API token (ft-stream)
 WEB_UI_PORT = 47990  # Vibepollo's Web UI, where ft-stream pairs and lists monitors
 STREAM_RATES = [30, 60, 72, 90, 120]
@@ -156,13 +170,13 @@ class Backend(QObject):
     def _ask(self, text):
         """Request/reply to ft-screens; None if it isn't running."""
         try:
-            self._sock.sendto(text.encode(), FT_SCREENS)
+            self._sock.sendto(text.encode(), compositor_addr())
             return self._sock.recv(4096).decode()
         except OSError:
             return None
 
     def _check(self):
-        running = os.path.exists(f"/run/user/{os.getuid()}/frametop/wayland-0")
+        running = desktop_socket_up()
         states = {}
         reply = self._ask("remotes") if running else None
         if reply and reply.startswith("ok"):
@@ -484,6 +498,11 @@ class Backend(QObject):
         self.busyChanged.emit()
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
+        env = QProcessEnvironment.systemEnvironment()
+        runtime = f"/run/user/{os.getuid()}"
+        if os.path.exists(os.path.join(runtime, "ft-hyprland-0")):
+            env.insert("FT_CONTROL_SOCKET", os.environ.get("FT_HYPRLAND_CONTROL", "ft_hyprland"))
+        proc.setProcessEnvironment(env)
         argv = host_command(os.path.abspath(FT_LAYOUT), *args)
         proc.finished.connect(lambda code, _status: self._done(proc, label, code))
         self._proc = proc

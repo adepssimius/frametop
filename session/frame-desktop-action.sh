@@ -69,7 +69,7 @@ case $action in
   window-next) hypr_eval 'hl.dispatch(hl.dsp.window.move({ workspace = "r+1", follow = false }))' ;;
   close) hypr_eval 'hl.dispatch(hl.dsp.window.close())' ;;
   terminal)
-    launch_first foot kitty alacritty wezterm konsole kgx uxterm xterm
+    launch_first kitty foot alacritty wezterm konsole kgx uxterm xterm
     ;;
   files)
     launch_first dolphin nautilus nemo thunar "kitty -1 fish -c yazi"
@@ -82,7 +82,7 @@ case $action in
       echo "frametop: qs is not installed; the end-4 launcher was not opened" >&2
       exit 0
     fi
-    qs -c "${FT_QS_CONFIG:-ii}" ipc --any-display call search toggle
+    timeout 2s qs -c "${FT_QS_CONFIG:-ii}" ipc call search toggle
     ;;
   *)
     echo "frametop: unknown desktop action: ${action:-<none>}" >&2

@@ -152,10 +152,14 @@ if [ "${1:-}" != --inner ]; then
     screen_list=$(printf '%s\n' "$spec" | awk -F= '/^screens=/{print $2}')
     frametop_hyprland_prepare_screens
     socket=$FT_HYPRLAND_SOCKET
-    echo "frametop: Hyprland desktop: ${FT_HYPR_OUTPUTS} output(s), primary ${FT_HYPRLAND_SCREEN} (the saved layout is not used)" >&2
+    echo "frametop: Hyprland desktop: ${FT_HYPR_OUTPUTS} output(s), primary ${FT_HYPRLAND_SCREEN}" >&2
     echo "frametop: $(date -Is) Hyprland desktop from $here" >> /tmp/frametop-hyprland-session.log
-    # Plasma already owns frametop.screen.1. These panels need their own overlay keys.
-    export FT_OVERLAY_PREFIX="${FT_OVERLAY_PREFIX:-frametop.hypr}"
+    # Alongside keeps different overlay keys so Plasma's screens stay put. The
+    # Hyprland desktop uses frametop.screen.N, the same keys as Plasma, so
+    # Hide/Show Screens, the pointer, and SteamVR's overlay list see them.
+    if [ -z "${FT_OVERLAY_PREFIX:-}" ] && [ -n "${FT_HYPRLAND_ALONGSIDE:-}" ]; then
+      export FT_OVERLAY_PREFIX=frametop.hyprx
+    fi
     screen_argv=()
     for spec_one in $screen_list; do
       screen_argv+=(--screen "$spec_one")

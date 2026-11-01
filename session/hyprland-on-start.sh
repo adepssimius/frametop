@@ -35,6 +35,11 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ ! -S "$XDG_RUNTIME_DIR/frametop-desktop.so
   setsid python3 "$here/frame-desktopd.py" "$XDG_RUNTIME_DIR/frametop-desktop.sock" \
     >/dev/null 2>&1 < /dev/null &
 fi
+# The profile this desktop starts in reopens its windows. Screen places
+# already came from the layout. This does not restart SteamVR.
+if [ -f "$here/hyprland_profile.py" ]; then
+  setsid python3 "$here/hyprland_profile.py" start >/dev/null 2>&1 < /dev/null &
+fi
 if command -v foot >/dev/null 2>&1; then
   exec foot
 elif command -v kitty >/dev/null 2>&1; then

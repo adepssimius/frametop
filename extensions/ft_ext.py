@@ -2,7 +2,8 @@
 """Small standard-library client for Frametop's versioned extension commands.
 
 No install, background daemon, OpenVR dependency or direct config-file edits.
-The control socket is the existing abstract AF_UNIX datagram @ft_screens.
+The control socket is the live compositor's abstract AF_UNIX datagram
+(@ft_hyprland when the Hyprland desktop is up, otherwise @ft_screens).
 """
 from __future__ import annotations
 
@@ -13,12 +14,25 @@ import secrets
 import socket
 
 
+def live_control(name: str = "ft_screens") -> str:
+    """The compositor drawing the VR screens. Callers can still pass --control."""
+    if name != "ft_screens":
+        return name
+    forced = os.environ.get("FT_CONTROL_SOCKET", "")
+    if forced:
+        return forced
+    if os.path.exists(f"/run/user/{os.getuid()}/ft-hyprland-0"):
+        return os.environ.get("FT_HYPRLAND_CONTROL") or "ft_hyprland"
+    return "ft_screens"
+
+
 class ExtensionError(RuntimeError):
     """Extension API is unavailable or rejected a command."""
 
 
 class Frametop:
     def __init__(self, control: str = "ft_screens", timeout: float = 1.5) -> None:
+        control = live_control(control)
         if not control or "\0" in control or len(control.encode()) > 90:
             raise ValueError("invalid abstract socket name")
         self.control = control

@@ -3,18 +3,32 @@
 
 The relay addresses @ft_screens. The experimental session listens on its own
 control name, so while Plasma's ft-screens is not running this process holds
-@ft_screens and passes key, click, and chord messages on. Layout commands
-are dropped.
+@ft_screens and passes messages on. Plasma leftover layout commands that
+would move or resize Hyprland panels are dropped. Everything else, including
+gaze/extension queries that need a reply, is proxied.
 """
 import socket
 import sys
 
-ALLOWED_PREFIXES = (b"key ", b"click ", b"vrkeyboard ", b"chord-click ")
-ALLOWED_EXACT = (b"up",)
+# Plasma's services still send to @ft_screens. While this process holds that
+# name, those datagrams have to reach the Hyprland compositor. Hide/Show
+# Screens, pause, pins, gaze get/remotes, and the pointer's click/up go
+# through here. place/size and KWin float commands stay listed so a leftover
+# Plasma ft-layout or ft-floatd cannot move Hyprland panels.
+DENIED_PREFIXES = (
+    b"place ", b"size ", b"float ", b"unfloat ", b"pose ", b"sub ",
+    b"minimized ", b"carry ",
+)
+# compositor.c does not reply to these; waiting would stall every key.
+NO_REPLY_PREFIXES = (b"key ", b"click ")
 
 
 def allowed(data):
-    return data in ALLOWED_EXACT or data.startswith(ALLOWED_PREFIXES)
+    return not data.startswith(DENIED_PREFIXES)
+
+
+def wants_reply(data):
+    return not data.startswith(NO_REPLY_PREFIXES)
 
 
 def main(argv):
@@ -30,11 +44,16 @@ def main(argv):
     target = b"\0" + target_name.encode()
     print(f"frametop: forwarding desktop keys @ft_screens -> @{target_name}", flush=True)
     while True:
-        data, _addr = listen.recvfrom(2048)
+        data, addr = listen.recvfrom(8192)
         if not allowed(data):
             continue
         try:
             out.sendto(data, target)
+            if not wants_reply(data):
+                continue
+            out.settimeout(1.0)
+            reply, _ = out.recvfrom(8192)
+            listen.sendto(reply, addr)
         except OSError:
             pass
     return 0

@@ -4,6 +4,7 @@
 Dolphin and other Qt apps launched by Hyprland read this session's
 XDG_CONFIG_HOME and XDG_DATA_HOME. The host's ~/.config is not a destination.
 """
+import configparser
 import hashlib
 import json
 import sys
@@ -125,23 +126,45 @@ def write_theme(colors_path: Path, config_home: Path, data_home: Path) -> None:
     # KColorScheme compares this to the scheme file and reloads a running app.
     scheme_hash = hashlib.sha1(scheme.read_bytes()).hexdigest()
     config_home.mkdir(parents=True, exist_ok=True)
-    (config_home / "kdeglobals").write_text(
-        "\n".join((
-            "[General]",
-            "ColorScheme=FrametopEnd4",
-            f"ColorSchemeHash={scheme_hash}",
-            "",
-            "[Icons]",
-            "Theme=breeze",
-            "",
-            "[KDE]",
-            "widgetStyle=Breeze",
-            "",
-            _preview_groups(),
-            "",
-        )),
-        encoding="utf-8",
-    )
+    # KDE applications read their active colors from kdeglobals. Merely
+    # naming a scheme does not apply its groups outside Plasma's settings daemon.
+    globals_path = config_home / "kdeglobals"
+    settings = configparser.ConfigParser(interpolation=None, strict=False)
+    settings.optionxform = str
+    if globals_path.is_file():
+        settings.read(globals_path, encoding="utf-8")
+    for section, values in {
+        "General": {"ColorScheme": "FrametopEnd4", "ColorSchemeHash": scheme_hash},
+        "Icons": {"Theme": "breeze"},
+        "KDE": {"widgetStyle": "Breeze"},
+    }.items():
+        if not settings.has_section(section):
+            settings.add_section(section)
+        for key, value in values.items():
+            settings.set(section, key, value)
+    scheme_settings = configparser.ConfigParser(interpolation=None)
+    scheme_settings.optionxform = str
+    scheme_settings.read(scheme, encoding="utf-8")
+    for section in scheme_settings.sections():
+        if section.startswith("Colors:"):
+            if not settings.has_section(section):
+                settings.add_section(section)
+            for key, value in scheme_settings.items(section):
+                settings.set(section, key, value)
+    if not settings.has_section("KFileDialog Settings"):
+        settings.add_section("KFileDialog Settings")
+    settings.set("KFileDialog Settings", "Show Preview", "true")
+    settings.set("KFileDialog Settings", "Show Preview Panel", "true")
+    settings.set("KFileDialog Settings", "View Style", "8")
+    if not settings.has_section("PreviewSettings"):
+        settings.add_section("PreviewSettings")
+    settings.set("PreviewSettings", "MaximumSize", "10485760")
+    for plugin in ("imagethumbnail", "jpegthumbnail", "pngthumbnail", "webpthumbnail",
+                   "svgthumbnail", "windowsimagethumbnail", "directorythumbnail"):
+        settings.set("PreviewSettings", plugin, "true")
+    with globals_path.open("w", encoding="utf-8") as output:
+        settings.write(output, space_around_delimiters=False)
+
     for name in ("gtk-3.0", "gtk-4.0"):
         gtk = config_home / name
         gtk.mkdir(parents=True, exist_ok=True)

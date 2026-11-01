@@ -56,8 +56,9 @@
 // The mmap samples are in head space, 17 ms or so old when they appear, so each is turned
 // into the room with the head pose at its own timestamp, from a short pose history.
 //
-// Screens come from ft-screens (@ft_screens: "screens", "remotes" for other machines'
-// displays, "get N"), refreshed 4 times a second in the background. A curved screen is a cylinder toward its front (see OnSurface
+// Screens come from ft-screens (@ft_hyprland when that desktop is up, else @ft_screens:
+// "screens", "remotes" for other machines' displays, "get N"), refreshed 4 times a second
+// in the background. A curved screen is a cylinder toward its front (see OnSurface
 // in screens/vr.cpp).
 #include <openvr.h>
 
@@ -343,13 +344,34 @@ public:
     }
 
 private:
+    static std::string ControlName() {
+        if (const char *env = std::getenv("FT_CONTROL_SOCKET"); env && *env) return env;
+        char path[96];
+        std::snprintf(path, sizeof path, "/run/user/%ld/frametop-hyprland.route", (long)getuid());
+        if (FILE *f = std::fopen(path, "r")) {
+            char line[128];
+            while (std::fgets(line, sizeof line, f)) {
+                if (std::strncmp(line, "control=", 8) != 0) continue;
+                std::fclose(f);
+                std::string name = line + 8;
+                while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
+                    name.pop_back();
+                if (!name.empty() && name.size() < 90) return name;
+                break;
+            }
+            std::fclose(f);
+        }
+        std::snprintf(path, sizeof path, "/run/user/%ld/ft-hyprland-0", (long)getuid());
+        if (access(path, F_OK) == 0) return "ft_hyprland";
+        return "ft_screens";
+    }
     static std::string Ask(int fd, const std::string &cmd) {
         sockaddr_un to{};
         to.sun_family = AF_UNIX;
-        const char name[] = "ft_screens";
-        std::memcpy(to.sun_path + 1, name, sizeof name - 1);
+        const std::string name = ControlName();
+        std::memcpy(to.sun_path + 1, name.c_str(), name.size());
         sendto(fd, cmd.data(), cmd.size(), 0, reinterpret_cast<sockaddr *>(&to),
-               offsetof(sockaddr_un, sun_path) + 1 + sizeof name - 1);
+               offsetof(sockaddr_un, sun_path) + 1 + name.size());
         char buf[1024];
         const ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
         if (n <= 0) return "";

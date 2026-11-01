@@ -26,11 +26,14 @@ Settings go to ~/.config/frametop.conf and ~/.config/frametop-layout.json. Anyth
 that touches SteamVR runs layout/ft-layout on the host.
 Launch with display-settings/ft-display-settings (host wrapper).
 """
+import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import threading
+from pathlib import Path
 
 from PySide6.QtCore import Property, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIcon
@@ -175,6 +178,87 @@ class Backend(QObject):
             pins.append(f[16] if len(f) > 16 else "none")
         return pins
 
+    def _route(self):
+        path = Path(f"/run/user/{os.getuid()}") / "frametop-hyprland.route"
+        values = {}
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value
+        except OSError:
+            pass
+        return values
+
+    def _hypr_json(self, kind):
+        route = self._route()
+        env = os.environ.copy()
+        if route.get("runtime"):
+            env["XDG_RUNTIME_DIR"] = route["runtime"]
+        if route.get("signature"):
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = route["signature"]
+        else:
+            runtime = env.get("XDG_RUNTIME_DIR", "")
+            hypr = os.path.join(runtime, "hypr")
+            if os.path.isdir(hypr):
+                names = sorted(os.listdir(hypr))
+                if names:
+                    env["HYPRLAND_INSTANCE_SIGNATURE"] = names[0]
+        try:
+            proc = subprocess.run(["hyprctl", kind, "-j"], capture_output=True, text=True,
+                                  check=False, env=env, timeout=3)
+            data = json.loads(proc.stdout or "null")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return []
+        if kind == "clients" and isinstance(data, list):
+            for client in data:
+                if isinstance(client, dict) and client.get("pid") and not client.get("cmd"):
+                    client["cmd"] = hyprland_layout.command_for_pid(client["pid"])
+        return data if isinstance(data, list) else []
+
+    def _output_map(self):
+        route = self._route()
+        runtime = route.get("runtime") or os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        try:
+            data = json.loads(Path(runtime, "frametop-output-map.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        mapping = data.get("mapping") if isinstance(data, dict) else {}
+        return mapping if isinstance(mapping, dict) else {}
+
+    def _write_profile_entry(self, name):
+        safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-") or "profile"
+        apps = Path.home() / ".local" / "share" / "applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        script = Path(hyprland_layout.__file__).resolve().parent / "hyprland_profile.py"
+        quoted = '"' + name.replace('"', '\\"') + '"'
+        text = "\n".join([
+            "[Desktop Entry]",
+            "Type=Application",
+            f"Name=Frametop: {name}",
+            "Comment=Open the Frametop desktop in this profile: its screens and apps",
+            f"Exec=python3 {script} open {quoted}",
+            "Icon=preferences-desktop-display",
+            "Categories=Utility;",
+            "X-Frametop-Profile=true",
+            "",
+        ])
+        (apps / f"frametop-profile-{safe}.desktop").write_text(text, encoding="utf-8")
+
+    def _open_profile(self, name):
+        if not name:
+            return
+        data = hyprland_layout.load()
+        for expr in hyprland_layout.open_profile_evals(
+                data, name, self._output_map(), self._hypr_json("clients")):
+            route = self._route()
+            env = os.environ.copy()
+            if route.get("runtime"):
+                env["XDG_RUNTIME_DIR"] = route["runtime"]
+            if route.get("signature"):
+                env["HYPRLAND_INSTANCE_SIGNATURE"] = route["signature"]
+            subprocess.run(["hyprctl", "eval", expr], check=False, env=env, timeout=3)
+
     def _ask_screens(self, text):
         """Request/reply to ft-screens; None if it isn't running."""
         try:
@@ -197,7 +281,7 @@ class Backend(QObject):
 
     @Property("QVariantList", notify=changed)
     def limitations(self):
-        return list(hyprland_layout.LIMITATIONS) if self._hypr() else []
+        return []
 
     @Property(bool, notify=changed)
     def restartNeeded(self):
@@ -316,7 +400,10 @@ class Backend(QObject):
     @Slot(int)
     def setScreens(self, n):
         if self._hypr():
-            self.message.emit("Hyprland screen count is per screen. Use Add screen.", True)
+            data = hyprland_layout.load()
+            hyprland_layout.set_count(data, n)
+            hyprland_layout.save(data)
+            self.changed.emit()
             return
         write_conf_value("SCREENS", str(max(1, min(6, n))))
         self.changed.emit()
@@ -324,7 +411,17 @@ class Backend(QObject):
     @Slot(int, int)
     def setResolution(self, w, h):
         if self._hypr():
-            self.message.emit("Set each Hyprland screen's resolution on its own card.", True)
+            if not (320 <= w <= 16384 and 200 <= h <= 16384):
+                self.message.emit("Width and height: 320 to 16384 pixels", True)
+                return
+            data = hyprland_layout.load()
+            for screen in hyprland_layout.screens_by_slot(data):
+                screen["size"] = [int(w), int(h)]
+            hyprland_layout.save(data)
+            self.changed.emit()
+            if self._running:
+                for screen in hyprland_layout.screens_by_slot(data):
+                    self._ask_screens(f"size {int(screen['slot'])} {w} {h}")
             return
         if w * h > MAX_PIXELS:
             self.message.emit(f"{w} × {h} is more than gamescope's VR mode can draw (1920 × 1080 worth of pixels, "
@@ -339,7 +436,14 @@ class Backend(QObject):
     @Slot(float)
     def setPhysWidth(self, w):
         if self._hypr():
-            self.message.emit("Hyprland panel width is set per screen.", True)
+            data = hyprland_layout.load()
+            for screen in hyprland_layout.screens_by_slot(data):
+                screen["metres"] = round(float(w), 3)
+            hyprland_layout.save(data)
+            self.changed.emit()
+            if self._running:
+                for screen in hyprland_layout.screens_by_slot(data):
+                    self._ask_screens(f"width {int(screen['slot'])} {float(w):.3f}")
             return
         write_conf_value("PHYS_WIDTH", f"{w:.2f}")
         self.changed.emit()
@@ -365,7 +469,20 @@ class Backend(QObject):
     @Slot(int, str)
     def setRotation(self, i, rotation):
         if self._hypr():
-            self.message.emit("A tall Hyprland screen is a tall resolution, not a rotation.", True)
+            data = hyprland_layout.load()
+            screen = hyprland_layout.screen_by_index(data, i)
+            w, h = int(screen["size"][0]), int(screen["size"][1])
+            tall = rotation in ("left", "right")
+            if tall and w > h:
+                screen["size"] = [h, w]
+            elif not tall and h > w:
+                screen["size"] = [h, w]
+            screen["rotation"] = rotation
+            hyprland_layout.save(data)
+            self.changed.emit()
+            if self._running:
+                sw, sh = screen["size"]
+                self._ask_screens(f"size {i + 1} {sw} {sh}")
             return
         layout = ft_layout.load_layout()
         screens = layout.setdefault("screens", [])
@@ -477,12 +594,30 @@ class Backend(QObject):
     # --- ft-screens: visibility and pinning ---
     @Property("QVariantMap", notify=changed)
     def visibility(self):
+        if self._hypr():
+            return ft_layout.visibility(hyprland_layout.load())
         return ft_layout.visibility(ft_layout.load_layout())
 
     @Slot(str, "QVariant")
     def setVisibility(self, key, value):
         if self._hypr():
-            self.message.emit("Follow and pin use the panel controls. The Plasma visibility profile is not written.", True)
+            data = hyprland_layout.load()
+            v = ft_layout.visibility(data)
+            v[key] = value
+            data["visibility"] = v
+            hyprland_layout.save(data)
+            self.changed.emit()
+            if self._running:
+                if key == "mode":
+                    self._ask_screens(f"visibility {value}")
+                elif key == "wrist_angle":
+                    self._ask_screens(f"wrist {float(value):.1f}")
+                elif key == "controllers":
+                    self._ask_screens(f"controllers {value}")
+                elif key == "in_games":
+                    self._ask_screens(f"ingames {value}")
+                else:
+                    self._ask_screens(f"gesture {v['gesture_hand']} {float(v['gesture_angle']):.1f}")
             return
         layout = ft_layout.load_layout()
         v = ft_layout.visibility(layout)
@@ -650,7 +785,9 @@ class Backend(QObject):
     def restartDesktop(self):
         """Restart the Frametop desktop (this app closes with it) to apply count and resolution."""
         if self._hypr():
-            self.message.emit("Hyprland does not restart the desktop from here. Add or remove a screen; SteamVR stays up.", True)
+            argv = host_command("systemctl", "--user", "restart", "frametop-desktop.service")
+            QProcess.startDetached(argv[0], argv[1:])
+            self.message.emit("Restarting the desktop…", False)
             return
         argv = host_command("systemd-run", "--user", "--collect", "--quiet", os.path.abspath(DESKTOPS), "restart")
         QProcess.startDetached(argv[0], argv[1:])
@@ -689,6 +826,7 @@ class Backend(QObject):
             try:
                 data = hyprland_layout.load()
                 hyprland_layout.use_named(data, name)
+                hyprland_layout.use_hidden(data, name)
                 hyprland_layout.save(data)
                 self.changed.emit()
             except RuntimeError as e:
@@ -704,10 +842,12 @@ class Backend(QObject):
         if self._hypr():
             try:
                 data = hyprland_layout.load()
-                hyprland_layout.save_named(data, name)
+                hyprland_layout.save_profile(
+                    data, name, self._hypr_json("clients"), self._hypr_json("monitors"), self._output_map())
                 hyprland_layout.save(data)
+                self._write_profile_entry(name)
                 self.changed.emit()
-                self.message.emit(f"Saved {name} in the Hyprland layout. Plasma profiles were not written.", False)
+                self.message.emit(f"Saved {name}.", False)
             except RuntimeError as e:
                 self.message.emit(str(e), True)
             return
@@ -723,7 +863,7 @@ class Backend(QObject):
             data = hyprland_layout.load()
             named = data.get("layouts") or {}
             if old not in named:
-                self.message.emit(f"No Hyprland layout called {old}", True)
+                self.message.emit(f"No layout called {old}", True)
                 return
             named[new] = named.pop(old)
             if data.get("active") == old:
@@ -758,7 +898,7 @@ class Backend(QObject):
     def profileWindows(self, name):
         """A profile's windows, as "app" and "where" for the list."""
         if self._hypr():
-            return []
+            return hyprland_layout.profile_window_rows(hyprland_layout.load(), name)
         out = []
         for e in ft_layout.load_layout().get("profiles", {}).get(name, {}).get("windows", []):
             app = e.get("app") or os.path.basename((e.get("cmd") or ["?"])[0])
@@ -770,13 +910,16 @@ class Backend(QObject):
     @Slot(str, result="QVariantList")
     def profileHidden(self, name):
         if self._hypr():
-            return []
+            return hyprland_layout.profile_record(hyprland_layout.load(), name).get("hidden") or []
         return ft_layout.load_layout().get("profiles", {}).get(name, {}).get("hidden", [])
 
     @Slot(str, int)
     def removeProfileWindow(self, name, index):
         if self._hypr():
-            self.message.emit("Profiles that reopen Plasma windows are not used on the Hyprland desktop.", True)
+            data = hyprland_layout.load()
+            hyprland_layout.remove_profile_window(data, name, index)
+            hyprland_layout.save(data)
+            self.changed.emit()
             return
         def edit(layout):
             windows = layout.get("profiles", {}).get(name, {}).get("windows", [])
@@ -787,13 +930,19 @@ class Backend(QObject):
     @Property(str, notify=changed)
     def defaultProfile(self):
         if self._hypr():
-            return ""
+            return hyprland_layout.load().get("default_profile", "") or ""
         return ft_layout.load_layout().get("default_profile", "")
 
     @Slot(str)
     def setDefaultProfile(self, name):
         if self._hypr():
-            self.message.emit("Profiles that reopen Plasma windows are not used on the Hyprland desktop.", True)
+            data = hyprland_layout.load()
+            if name:
+                data["default_profile"] = name
+            else:
+                data.pop("default_profile", None)
+            hyprland_layout.save(data)
+            self.changed.emit()
             return
         def edit(layout):
             if name:
@@ -830,7 +979,10 @@ class Backend(QObject):
                 self._ask_screens(command["width"])
                 self._ask_screens(command["curve"])
                 self._ask_screens(command["place"])
-            self.message.emit("Hyprland panels placed from the current heading. Plasma's screens were not moved.", False)
+            for command in hyprland_layout.visibility_commands(data):
+                self._ask_screens(command)
+            self._open_profile(data.get("active") or "")
+            self.message.emit("Panels placed from the current heading.", False)
             return
         layout = ft_layout.load_layout()
         name = layout.get("active")
@@ -861,7 +1013,7 @@ class Backend(QObject):
             data["mode"] = "custom"
             hyprland_layout.save(data)
             self.changed.emit()
-            self.message.emit("Saved the Hyprland arrangement relative to the current heading.", False)
+            self.message.emit("Saved the current arrangement.", False)
             return
         self._run("Saving the current arrangement", "capture")
 

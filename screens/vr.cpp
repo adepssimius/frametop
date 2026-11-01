@@ -2210,7 +2210,14 @@ void ft_vr_screen_create(int index, double metres, int count) {
     Mat head;
     if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head)) head = Identity();
     const double heading = std::atan2(head.m[0][2], head.m[2][2]) * 180 / M_PI;
-    const double yaw = heading + (double(count - 1) / 2 - index) * 35;
+    // A 1.5 m panel 2 m ahead is about 41 degrees wide. 35 degrees between
+    // centres stacks the neighbours, so the laser hits the middle panel.
+    double step = 35;
+    if (count >= 2 && metres > 0) {
+        const double half = std::atan((metres * 0.5) / 2.0) * 180.0 / M_PI;
+        step = std::max(step, 2 * half + 8);
+    }
+    const double yaw = heading + (double(count - 1) / 2 - index) * step;
     const double dx = -std::sin(yaw * M_PI / 180), dz = -std::cos(yaw * M_PI / 180);
     SetAbsolute(s, PanelPose(head.m[0][3] + dx * 2, head.m[1][3], head.m[2][3] + dz * 2, yaw, 0, 0));
 }

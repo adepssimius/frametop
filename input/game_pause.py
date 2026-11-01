@@ -53,6 +53,15 @@ REMOTE_CTL = os.path.join(REPO, "session", "remote-ctl.sh")
 RELAY = "\0frametop_relay"
 SCREENS = "\0ft_screens"
 STATE_PATH = f"/run/user/{os.getuid()}/frametop-pause.json"
+
+
+def screens_addr():
+    """The compositor that is drawing the VR screens. Tests override SCREENS."""
+    if SCREENS != "\0ft_screens":
+        return SCREENS
+    if os.path.exists(f"/run/user/{os.getuid()}/ft-hyprland-0"):
+        return "\0" + os.environ.get("FT_HYPRLAND_CONTROL", "ft_hyprland")
+    return SCREENS
 # User services that pausing stops, if they run.
 UNITS = ("frametop-gaze.service", "frametop-hands.service", "frametop-camd.service")
 # What still works while paused, besides commands ("command:CMD"): the toggle itself, and Steam's menu.
@@ -435,7 +444,7 @@ class GamePause:
 
     def tell_screens(self, paused):
         try:
-            self.screens.sendto(b"pause on" if paused else b"pause off", SCREENS)
+            self.screens.sendto(b"pause on" if paused else b"pause off", screens_addr())
         except OSError:
             pass  # the desktop isn't running
 

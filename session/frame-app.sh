@@ -22,7 +22,7 @@ launch_first() {
 }
 
 case "$action" in
-    terminal) launch_first foot kitty alacritty ;;
+    terminal) launch_first kitty foot alacritty ;;
     files) launch_first dolphin nautilus nemo thunar ;;
     browser) launch_first google-chrome-stable firefox chromium ;;
     *)

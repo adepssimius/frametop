@@ -93,6 +93,15 @@ PANEL_PROG = REPO / "gaze" / "build" / "ft-gazepanel"
 PANEL = "\0ft_gazepanel"
 POINTER = "\0ft_pointer_helper"
 SCREENS = "\0ft_screens"
+
+
+def screens_addr():
+    """The compositor drawing the VR screens. Tests override SCREENS."""
+    if SCREENS != "\0ft_screens":
+        return SCREENS
+    if os.path.exists(f"/run/user/{os.getuid()}/ft-hyprland-0"):
+        return "\0" + os.environ.get("FT_HYPRLAND_CONTROL", "ft_hyprland")
+    return SCREENS
 EYES = "\0ft_eyes"
 CONF = Path.home() / ".config" / "frametop.conf"
 CALIBRATION = STATE / "calibration.json"
@@ -519,10 +528,10 @@ class Checks:
         log(f"{kind} check: {reason}" + (" (our tracker's first: no gaze yet, so each click takes the look "
                                          "up to it)" if blind else ""))
         if kind == "full":
-            st = ask(SCREENS, "state", 0.5).split()
+            st = ask(screens_addr(), "state", 0.5).split()
             if len(st) >= 3 and st[0] == "ok":
                 self.screens_shown = (st[2] == "0") if st[1] == "always" else (st[2] == "1")
-                ask(SCREENS, "hide", 0.5)
+                ask(screens_addr(), "hide", 0.5)
         self.to_helper("calpanel 1")
         off = off_panel(kind, own)
         if off:
@@ -876,7 +885,7 @@ class Checks:
         self.to_panel("hide")
         self.to_helper("calpanel 0")
         if self.check["kind"] == "full" and self.screens_shown:
-            ask(SCREENS, "show", 0.5)
+            ask(screens_addr(), "show", 0.5)
         self.screens_shown = None
         self.check = None
 

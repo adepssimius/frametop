@@ -87,8 +87,15 @@ def serve(path, script):
                 continue
             env = dict(os.environ)
             env["FT_DESKTOP_INNER"] = "1"
-            result = subprocess.run([script, action], env=env, check=False)
-            conn.sendall(f"{result.returncode}\n".encode())
+            try:
+                result = subprocess.run([script, action], env=env, check=False, timeout=2.5)
+                code = result.returncode
+            except subprocess.TimeoutExpired:
+                code = 124
+            try:
+                conn.sendall(f"{code}\n".encode())
+            except OSError:
+                pass  # caller may have disconnected while the action ran
 
 
 def main(argv):

@@ -28,14 +28,7 @@ PRIMARY_SIZE = (1920, 1080)
 PRIMARY_METRES = 1.5
 MAX_SCREENS = 24
 
-LIMITATIONS = (
-    "Hyprland session. KWin floating windows are not screens.",
-    "Remote desktop and krdp are not available on this desktop.",
-    "Profiles that reopen Plasma windows are not used here.",
-    "A saved pose is relative to the headset heading when it was saved, not a fixed point in the room.",
-    "Pointer crossing follows the left-to-right monitor row. A second VR row does not add a vertical crossing.",
-    "Named layouts stay in this file. They are not Steam library entries.",
-)
+LIMITATIONS = ()
 
 
 def layout_path():
@@ -91,7 +84,7 @@ def load(path=None):
             "metres": float(entry.get("metres", PRIMARY_METRES)),
             "scale": float(entry.get("scale", 1.0)),
             "curve": float(entry.get("curve", 0.0)),
-            **{k: entry[k] for k in ("pos", "face", "roll", "hidden") if k in entry},
+            **{k: entry[k] for k in ("pos", "face", "roll", "hidden", "pin") if k in entry},
         })
     if screens:
         layout["screens"] = screens
@@ -107,6 +100,9 @@ def load(path=None):
         layout["layouts"] = named
     if saved.get("active"):
         layout["active"] = saved["active"]
+    for key in ("profiles", "visibility", "default_profile", "hosts"):
+        if key in saved:
+            layout[key] = saved[key]
     return layout
 
 
@@ -301,6 +297,16 @@ def sync_actions(layout, live_names, previous, placed_ids, baseline=0):
     }
 
 
+def set_count(layout, n):
+    """Grow or shrink the layout to n screens. The last screen stays."""
+    n = max(1, min(MAX_SCREENS, int(n)))
+    while len(screens_by_slot(layout)) < n:
+        add_screen(layout)
+    while len(screens_by_slot(layout)) > n:
+        remove_screen(layout, int(screens_by_slot(layout)[-1]["slot"]))
+    return layout
+
+
 def add_screen(layout, size=PRIMARY_SIZE, metres=PRIMARY_METRES):
     screens = screens_by_slot(layout)
     if len(screens) >= MAX_SCREENS:
@@ -342,13 +348,135 @@ def screen_by_index(layout, index):
     raise RuntimeError(f"frametop: no Hyprland screen {slot}")
 
 
+def capture_windows(clients, monitors):
+    """Open Hyprland windows, as a profile stores them.
+
+    `clients` and `monitors` are hyprctl's JSON. The shell and Steam's own
+    windows are left out. A window's screen is the monitor it is on now.
+    """
+    names = {}
+    for monitor in monitors or []:
+        if isinstance(monitor, dict) and monitor.get("name"):
+            names[int(monitor.get("id", -1))] = monitor["name"]
+    skip = {"quickshell", "steam", "steamwebhelper"}
+    windows = []
+    for client in clients or []:
+        if not isinstance(client, dict):
+            continue
+        app = str(client.get("class") or client.get("initialClass") or "")
+        if not app or app.lower() in skip:
+            continue
+        workspace = client.get("workspace") or {}
+        at = client.get("at") or [0, 0]
+        size = client.get("size") or [0, 0]
+        windows.append({
+            "app": app,
+            "title": str(client.get("title") or ""),
+            "monitor": names.get(int(client.get("monitor", -1)), ""),
+            "workspace": int(workspace.get("id") or 1),
+            "floating": bool(client.get("floating")),
+            "at": [int(at[0]), int(at[1])],
+            "size": [int(size[0]), int(size[1])],
+            "cmd": [str(part) for part in (client.get("cmd") or []) if part],
+        })
+    return windows
+
+
+def save_profile(layout, name, clients, monitors, mapping):
+    """Save the arrangement and the windows that are open on it."""
+    name = save_named(layout, name)
+    by_name = {str(monitor): str(ident) for monitor, ident in (mapping or {}).items()}
+    slot_for = {screen["id"]: int(screen["slot"]) for screen in screens_by_slot(layout)}
+    windows = capture_windows(clients, monitors)
+    for window in windows:
+        ident = by_name.get(window["monitor"], "")
+        window["screen"] = slot_for.get(ident, 1)
+    hidden = [int(screen["slot"]) for screen in screens_by_slot(layout) if screen.get("hidden")]
+    layout.setdefault("profiles", {})[name] = {"windows": windows, "hidden": hidden}
+    return name
+
+
+def profile_record(layout, name):
+    return (layout.get("profiles") or {}).get(name) or {}
+
+
+def profile_window_rows(layout, name):
+    """The rows Display Settings lists: app, and where it opens."""
+    rows = []
+    for window in profile_record(layout, name).get("windows") or []:
+        where = f"screen {int(window.get('screen') or 1)}"
+        if window.get("workspace"):
+            where += f", workspace {int(window['workspace'])}"
+        if window.get("floating"):
+            where += ", floating"
+        rows.append({"app": window.get("app") or "?", "where": where})
+    return rows
+
+
+def remove_profile_window(layout, name, index):
+    windows = profile_record(layout, name).get("windows") or []
+    if 0 <= int(index) < len(windows):
+        windows.pop(int(index))
+
+
+def command_for_pid(pid):
+    """The process command line, for reopening a window that is not open."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes().split(b"\0")
+    except (OSError, ValueError):
+        return []
+    return [part.decode(errors="replace") for part in raw if part]
+
+
+def open_profile_evals(layout, name, mapping, live_clients=None):
+    """Lua for hyprctl eval that puts each saved window on its screen.
+
+    An open window of the same class is moved. Otherwise the saved command
+    is started on that screen's workspace.
+    """
+    by_id = {str(ident): str(monitor) for monitor, ident in (mapping or {}).items()}
+    slot_id = {int(screen["slot"]): screen["id"] for screen in screens_by_slot(layout)}
+    waiting = {}
+    for client in live_clients or []:
+        if not isinstance(client, dict):
+            continue
+        app = str(client.get("class") or client.get("initialClass") or "").lower()
+        address = str(client.get("address") or "")
+        if app and address:
+            waiting.setdefault(app, []).append(address)
+    evals = []
+    for window in profile_record(layout, name).get("windows") or []:
+        ident = slot_id.get(int(window.get("screen") or 1), "")
+        monitor = by_id.get(ident, "")
+        workspace = int(window.get("workspace") or 1)
+        app = str(window.get("app") or "").lower()
+        addresses = waiting.get(app) or []
+        address = addresses.pop(0) if addresses else ""
+        focus = ""
+        if monitor:
+            focus = f'hl.dispatch(hl.dsp.focus({{ monitor = "{monitor}" }})); '
+        focus += f"hl.dispatch(hl.dsp.focus({{ workspace = {workspace} }})); "
+        if address:
+            evals.append(
+                focus
+                + f'hl.dispatch(hl.dsp.focus({{ window = "{address}" }})); '
+                + f"hl.dispatch(hl.dsp.window.move({{ workspace = {workspace}, follow = false }}))"
+            )
+        else:
+            cmd = " ".join(window.get("cmd") or [])
+            if cmd:
+                evals.append(focus + f"hl.dispatch(hl.dsp.exec_cmd({json.dumps(cmd)}))")
+    return evals
+
+
 def save_named(layout, name):
     name = " ".join(name.split())
     if not name:
         raise RuntimeError("frametop: the layout needs a name")
     snapshot = []
     for screen in screens_by_slot(layout):
-        snapshot.append({k: screen[k] for k in screen if k in ("id", "slot", "size", "metres", "scale", "curve", "pos", "face", "roll")})
+        snapshot.append({k: screen[k] for k in screen if k in (
+            "id", "slot", "size", "metres", "scale", "curve", "pos", "face", "roll", "hidden", "pin")})
     layout.setdefault("layouts", {})[name] = {"screens": snapshot, "primary": layout.get("primary")}
     layout["active"] = name
     return name
@@ -363,9 +491,13 @@ def use_named(layout, name):
         screen = by_id.get(saved.get("id"))
         if not screen:
             continue
-        for key in ("size", "metres", "scale", "curve", "pos", "face", "roll"):
+        for key in ("size", "metres", "scale", "curve", "pos", "face", "roll", "hidden", "pin"):
             if key in saved:
                 screen[key] = saved[key]
+        if "hidden" not in saved:
+            screen.pop("hidden", None)
+        if "pin" not in saved:
+            screen.pop("pin", None)
     if named.get("primary"):
         layout["primary"] = named["primary"]
     layout["mode"] = "custom"
@@ -383,14 +515,339 @@ def socket_name():
 
 
 def active():
-    """True when Display Settings should edit this layout instead of Plasma's."""
+    """True when Display Settings should edit this layout instead of Plasma's.
+
+    The shell's private runtime is not where ft-screens puts its socket, so
+    the host runtime is checked as well.
+    """
     forced = os.environ.get("FT_DISPLAY_COMPOSITOR", "")
     if forced == "hyprland":
         return True
     if forced == "plasma":
         return False
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return os.path.exists(os.path.join(runtime, "ft-hyprland-0"))
+    name = socket_name()
+    runtimes = []
+    private = os.environ.get("XDG_RUNTIME_DIR")
+    if private:
+        runtimes.append(private)
+    host = f"/run/user/{os.getuid()}"
+    if host not in runtimes:
+        runtimes.append(host)
+    return any(os.path.exists(os.path.join(runtime, name)) for runtime in runtimes)
+
+
+def visibility_commands(layout):
+    """The same visibility and hidden-screen commands Plasma sends at start."""
+    v = ft_layout.visibility(layout)
+    commands = [
+        f"visibility {v['mode']}",
+        f"wrist {float(v['wrist_angle']):.1f}",
+        f"gesture {v['gesture_hand']} {float(v['gesture_angle']):.1f}",
+        f"controllers {v['controllers']}",
+        f"ingames {v['in_games']}",
+    ]
+    for screen in screens_by_slot(layout):
+        word = "conceal" if screen.get("hidden") else "reveal"
+        commands.append(f"{word} {int(screen['slot'])}")
+    return commands
+
+
+def arrange_commands(layout, eye, heading):
+    """place/width/curve for Arrange now and Reset Screen Layout."""
+    commands = []
+    for item in place_commands(layout, eye, heading):
+        commands.extend([item["width"], item["curve"], item["place"]])
+    return commands
+
+
+def parse_head(reply):
+    parts = (reply or "").split()
+    if len(parts) < 5 or parts[0] != "ok":
+        raise RuntimeError("no headset pose yet")
+    return tuple(map(float, parts[1:4])), float(parts[4])
+
+
+def use_hidden(layout, name):
+    """A profile's hidden screens as each screen's own setting."""
+    hidden = {int(n) for n in (profile_record(layout, name).get("hidden") or [])}
+    for screen in screens_by_slot(layout):
+        if int(screen["slot"]) in hidden:
+            screen["hidden"] = True
+        else:
+            screen.pop("hidden", None)
+
+
+def write_launchers(layout):
+    """SteamVR launch-bar entries that open Hyprland profiles, not Plasma's ft-layout."""
+    apps = Path.home() / ".local" / "share" / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).resolve().parent / "hyprland_profile.py"
+    want = {}
+    for name in sorted((layout.get("layouts") or {}).keys()):
+        safe = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-") or "profile"
+        quoted = '"' + name.replace('"', '\\"') + '"'
+        want[f"frametop-profile-{safe}.desktop"] = "\n".join([
+            "[Desktop Entry]",
+            "Type=Application",
+            f"Name=Frametop: {name}",
+            "Comment=Open the Frametop desktop in this profile: its screens and apps",
+            f"Exec=python3 {script} open {quoted}",
+            "Icon=preferences-desktop-display",
+            "Categories=Utility;",
+            "X-Frametop-Profile=true",
+            "",
+        ])
+    for path in apps.glob("frametop-profile-*.desktop"):
+        if path.name not in want:
+            path.unlink()
+    for name, text in want.items():
+        dest = apps / name
+        if dest.exists() and dest.read_text(encoding="utf-8") == text:
+            continue
+        dest.write_text(text, encoding="utf-8")
+
+
+def ask_screens(text):
+    return ft_layout.screens_socket().ask(text)
+
+
+def apply_live(layout, ask):
+    """Place every Hyprland screen from the current heading, then visibility and remotes."""
+    eye, heading = parse_head(ask("head"))
+    for command in arrange_commands(layout, eye, heading):
+        ask(command)
+    for command in visibility_commands(layout):
+        ask(command)
+    if layout.get("hosts"):
+        sock = ft_layout.screens_socket()
+        ft_layout.start_remotes(sock, layout)
+        ft_layout.place_remotes(sock, layout, max_slot(layout), eye, heading)
+    return 0
+
+
+def apply_profile(name, ask=None):
+    """Open a named layout (or the current one) the way Plasma's ft-layout use does."""
+    data = load()
+    if name:
+        use_named(data, name)
+        use_hidden(data, name)
+        ft_layout.open_remotes(data, name)
+        save(data)
+    ask = ask or ask_screens
+    apply_live(data, ask)
+    return data
+
+
+def start_name(layout):
+    name = os.environ.get("FT_PROFILE") or layout.get("default_profile")
+    return name if name and name in (layout.get("layouts") or {}) else None
+
+
+def cli_reset(ask=None):
+    """Put the Hyprland screens back in the saved layout. Same job as ft-layout reset."""
+    data = load()
+    name = data.get("active") if data.get("mode") == "custom" else None
+    if name and name not in (data.get("layouts") or {}):
+        name = None
+    apply_profile(name or "", ask=ask)
+    return 0
+
+
+def cli_capture(ask=None):
+    ask = ask or ask_screens
+    data = load()
+    eye, heading = parse_head(ask("head"))
+    for screen in screens_by_slot(data):
+        got = ask(f"get {int(screen['slot'])}")
+        pose = ft_layout.parse_get(got)
+        screen.update(ft_layout.relative_pose(pose["center"], pose["x"], pose["z"], eye, heading))
+        screen["metres"] = round(float(pose["metres"]), 3)
+        screen["curve"] = round(float(pose["curve"]), 3)
+        screen.pop("pin", None)
+        if "rel" in pose:
+            screen["pin"] = {"hand": pose["hand"], "rel": pose["rel"]}
+    data["mode"] = "custom"
+    data.pop("active", None)
+    if data.get("hosts"):
+        ft_layout.capture_remotes(ft_layout.screens_socket(), data, eye, heading)
+    save(data)
+    return 0
+
+
+def set_hidden(which, hidden):
+    data = load()
+    slots = [int(s["slot"]) for s in screens_by_slot(data)]
+    remotes = {num: d for num, _, d in ft_layout.remote_displays(data)}
+    if which == "all":
+        picked, picked_remote = list(slots), list(remotes)
+    elif which.isdigit() and int(which) in remotes:
+        picked, picked_remote = [], [int(which)]
+    elif which.isdigit() and int(which) in slots:
+        picked, picked_remote = [int(which)], []
+    else:
+        raise RuntimeError(f"no screen {which} (1 to {max(slots, default=0)}, or a remote display's number)")
+    by_slot = {int(s["slot"]): s for s in data.get("screens") or []}
+    for slot in picked:
+        if hidden:
+            by_slot[slot]["hidden"] = True
+        else:
+            by_slot[slot].pop("hidden", None)
+    for num in picked_remote:
+        if hidden:
+            remotes[num]["hidden"] = True
+        else:
+            remotes[num].pop("hidden", None)
+    save(data)
+    sock = ft_layout.screens_socket()
+    for num in picked + picked_remote:
+        sock.ask(f"{'conceal' if hidden else 'reveal'} {num}")
+
+
+def open_windows(name):
+    """Hyprland windows for a profile. Isolated so tests can skip hyprctl."""
+    import hyprland_profile
+    hyprland_profile.open_windows(name)
+
+
+LAYOUT_COMMANDS = (
+    "apply", "reset", "capture", "save", "use", "start", "open", "default",
+    "layouts", "rename", "delete", "launchers", "plan", "scale", "screen-args",
+    "remote-view", "toggle", "hide", "show", "hidden", "pin", "unpin", "remote",
+)
+
+
+def cli(argv, ask=None):
+    """ft-layout commands against the Hyprland layout and compositor.
+
+    Returns an exit code, or None if the command is not one of these.
+    """
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd not in LAYOUT_COMMANDS:
+        return None
+    ask = ask or ask_screens
+    data = load()
+    if cmd == "toggle":
+        print(ask("toggle"))
+        return 0
+    if cmd in ("hide", "show") and len(argv) == 3:
+        set_hidden(argv[2], cmd == "hide")
+        return 0
+    if cmd == "hidden":
+        print(" ".join(str(int(s["slot"])) for s in screens_by_slot(data) if s.get("hidden")))
+        return 0
+    if cmd in ("pin", "unpin") and len(argv) >= 3:
+        print(ask(" ".join(argv[1:])))
+        return 0
+    if cmd == "reset":
+        return cli_reset(ask=ask)
+    if cmd == "apply":
+        wait = float(argv[argv.index("--wait") + 1]) if "--wait" in argv else 0
+        if wait and not data.get("auto", True):
+            for command in visibility_commands(data):
+                ask(command)
+            return 0
+        name = data.get("active") if data.get("mode") == "custom" else None
+        apply_profile(name if name in (data.get("layouts") or {}) else "", ask=ask)
+        return 0
+    if cmd == "capture":
+        return cli_capture(ask=ask)
+    if cmd == "save" and len(argv) == 3:
+        ft_layout.check_name(argv[2])
+        cli_capture(ask=ask)
+        data = load()
+        try:
+            import hyprland_profile
+            env, runtime = hyprland_profile.hypr_env()
+            save_profile(data, argv[2], hyprland_profile.hypr_json("clients", env),
+                         hyprland_profile.hypr_json("monitors", env), hyprland_profile.output_map(runtime))
+        except (OSError, RuntimeError, ValueError):
+            save_named(data, argv[2])
+        save(data)
+        write_launchers(data)
+        return 0
+    if cmd == "use" and len(argv) == 3:
+        apply_profile(argv[2], ask=ask)
+        open_windows(argv[2])
+        return 0
+    if cmd == "open" and len(argv) == 3:
+        if argv[2] not in (data.get("layouts") or {}):
+            raise RuntimeError(f"no profile called {argv[2]!r}")
+        apply_profile(argv[2], ask=ask)
+        open_windows(argv[2])
+        return 0
+    if cmd == "start":
+        name = start_name(data)
+        apply_profile(name or "", ask=ask)
+        if name:
+            open_windows(name)
+        return 0
+    if cmd == "layouts":
+        for name in sorted((data.get("layouts") or {}).keys()):
+            print(("* " if name == data.get("active") and data.get("mode") == "custom" else "  ") + name)
+        return 0
+    if cmd == "rename" and len(argv) == 4:
+        named = data.setdefault("layouts", {})
+        if argv[2] not in named:
+            raise RuntimeError(f"no layout called {argv[2]!r}")
+        named[argv[3]] = named.pop(argv[2])
+        profiles = data.get("profiles") or {}
+        if argv[2] in profiles:
+            profiles[argv[3]] = profiles.pop(argv[2])
+        if data.get("default_profile") == argv[2]:
+            data["default_profile"] = argv[3]
+        if data.get("active") == argv[2]:
+            data["active"] = argv[3]
+        save(data)
+        write_launchers(data)
+        return 0
+    if cmd == "delete" and len(argv) == 3:
+        if (data.get("layouts") or {}).pop(argv[2], None) is None:
+            raise RuntimeError(f"no layout called {argv[2]!r}")
+        (data.get("profiles") or {}).pop(argv[2], None)
+        if data.get("default_profile") == argv[2]:
+            data.pop("default_profile", None)
+        if data.get("active") == argv[2]:
+            data.pop("active", None)
+        save(data)
+        write_launchers(data)
+        return 0
+    if cmd == "launchers":
+        write_launchers(data)
+        return 0
+    if cmd == "default" and len(argv) == 3:
+        if argv[2] == "none":
+            data.pop("default_profile", None)
+        elif argv[2] in (data.get("layouts") or {}):
+            data["default_profile"] = argv[2]
+        else:
+            raise RuntimeError(f"no profile called {argv[2]!r}")
+        save(data)
+        return 0
+    if cmd == "plan":
+        print(json.dumps(poses_for(data)))
+        return 0
+    if cmd == "screen-args":
+        print(" ".join(
+            f"--screen {int(s['size'][0])}x{int(s['size'][1])}@{float(s['metres']):.3f}"
+            for s in screens_by_slot(data)))
+        return 0
+    if cmd == "scale":
+        return 0
+    if cmd == "remote-view":
+        print("0 0 0 0 0 0")
+        return 0
+    if cmd == "remote":
+        original_load, original_save = ft_layout.load_layout, ft_layout.save_layout
+        ft_layout.load_layout = load
+        ft_layout.save_layout = save
+        try:
+            ft_layout.remote_command(argv[2:])
+        finally:
+            ft_layout.load_layout = original_load
+            ft_layout.save_layout = original_save
+        return 0
+    print(f"unknown command: {cmd}", file=sys.stderr)
+    return 2
 
 
 def main(argv):

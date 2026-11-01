@@ -27,7 +27,7 @@ So a "Work" profile can put three screens around you with a browser, two termina
 
 ## Where profiles live
 
-`~/.config/frametop-layout.json` keeps its `layouts` as they are (`{"Work": [screen places]}`), so older copies of ft-layout still read it. What a profile adds goes in a parallel `profiles` map under the same names:
+Plasma keeps profiles in `~/.config/frametop-layout.json`. The Hyprland desktop keeps the same `layouts` / `profiles` maps in `~/.config/frametop/hyprland-layout.json`. Plasma's file stays untouched while Hyprland is the desktop. What a profile adds goes in a parallel `profiles` map under the same names:
 
 ```
 "layouts":  {"Work": [{"pos": ..., "face": ..., "roll": ..., "metres": ..., "curve": ..., "pin": ...}, ...]},

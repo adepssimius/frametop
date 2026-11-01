@@ -112,6 +112,79 @@ def plasma_running():
     return found
 
 
+def valid_control(name):
+    if not name or len(name) > 64:
+        return False
+    return name.replace("_", "").replace("-", "").isalnum()
+
+
+def _claim_state(state):
+    """Named panel and the older unnamed desktop are tracked separately."""
+    if "named_until" in state or "default_until" in state:
+        return state.get("named_until", 0), state.get("named", ""), state.get("default_until", 0)
+    control = state.get("control", "")
+    until = state.get("until", 0)
+    if control:
+        return until, control, 0
+    return 0, "", until
+
+
+def _pack_claim(named_until, named, default_until, now):
+    if named and now < named_until:
+        until, control = named_until, named
+    else:
+        until, control = default_until, ""
+    return {
+        "until": until,
+        "control": control,
+        "named_until": named_until,
+        "named": named,
+        "default_until": default_until,
+    }
+
+
+def keyboard_claim(state, words, now):
+    """Where the next keybind goes.
+
+    A panel names its control socket while the laser is on it. Releasing
+    that panel ("0 <control>") drops only that claim. The older unnamed
+    "keyboard hyprland" keeps the center desktop, and an unnamed "0" from
+    that desktop does not take the keyboard away from a panel.
+    """
+    named_until, named, default_until = _claim_state(state or {})
+    if len(words) < 2 or words[0] != "keyboard" or words[1] != "hyprland":
+        return _pack_claim(named_until, named, default_until, now)
+    if len(words) >= 4 and words[2] == "0" and valid_control(words[3]):
+        if named == words[3]:
+            named_until, named = 0, ""
+        return _pack_claim(named_until, named, default_until, now)
+    if len(words) >= 3 and words[2] == "0":
+        return _pack_claim(named_until, named, 0, now)
+    if len(words) >= 3 and valid_control(words[2]):
+        return _pack_claim(now + 3, words[2], default_until, now)
+    return _pack_claim(named_until, named, now + 3, now)
+
+
+def route_file_for_control(control=""):
+    """Route file for the panel under the laser, or the center desktop."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    found = []
+    if runtime:
+        for name in ("frametop-hyprland.route", "frametop-hypr-exp.route"):
+            path = os.path.join(runtime, name)
+            info = load(path)
+            if info and pid_alive(info["pid"]):
+                found.append((path, info))
+    if control:
+        for path, info in found:
+            if info["control"] == control:
+                return path
+    for path, info in found:
+        if info["control"] != "ft_hypr_exp":
+            return path
+    return found[0][0] if found else ""
+
+
 def live_route(path=None):
     """The experimental session, whether or not Plasma's compositor is also up."""
     info = load(path)

@@ -89,10 +89,10 @@ class FrameDesktopTests(unittest.TestCase):
         self.assertIn("frame-quickshell.sh", code)
         launcher = (SESSION / "frametop-session.sh").read_text()
         self.assertIn("ft-hyprland-0", launcher)
-        self.assertIn("frametop.hypr", launcher)
         self.assertIn("FT_HYPRLAND_ALONGSIDE", launcher)
         self.assertIn("ft-hypr-exp-0", launcher)
         self.assertIn("frametop.hyprx", launcher)
+        self.assertIn("frametop.screen", launcher)
         self.assertIn("Plasma's ft-screens", launcher)
         self.assertIn("keyboard hyprland", (ROOT / "screens" / "compositor.c").read_text())
         guard = (SESSION / "frame-hypr" / "hyprland" / "services" / "create_custom_config.lua").read_text()
@@ -137,9 +137,38 @@ class FrameDesktopTests(unittest.TestCase):
             self.assertIn("ColorScheme=FrametopEnd4", (app / "kdeglobals").read_text())
             self.assertTrue((data / "color-schemes" / "FrametopEnd4.colors").is_file())
             self.assertIn("breeze", (app / "gtk-3.0" / "settings.ini").read_text())
+            fish_config = app / "fish" / "config.fish"
+            self.assertIn("starship init fish", fish_config.read_text())
+            self.assertTrue((app / "starship.toml").is_file())
+            fish_config.write_text("# user's own shell config\n")
+            chosen = root / "chosen.png"
+            chosen.write_text("image")
+            seeded["background"]["wallpaperPath"] = str(chosen)
+            (impulse / "config.json").write_text(json.dumps(seeded))
+            path_txt = state / "quickshell/user/generated/wallpaper/path.txt"
+            path_txt.write_text(str(chosen) + "\n")
+            again = run(SESSION / "frame-theme.sh", str(config), XDG_STATE_HOME=str(state),
+                        XDG_RUNTIME_DIR=str(runtime), HOME=str(root / "home"))
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(fish_config.read_text(), "# user's own shell config\n")
+            self.assertEqual(json.loads((impulse / "config.json").read_text())["background"]["wallpaperPath"], str(chosen))
+            self.assertEqual(path_txt.read_text().strip(), str(chosen))
             compositor = (ROOT / "screens" / "compositor.c").read_text()
             self.assertIn("e->button == BTN_RIGHT", compositor)
             self.assertIn("R1 stays a normal left click", compositor)
+
+    def test_session_settings_entries_use_the_running_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            result = run(SESSION / "frame-quickshell.sh", HOME=str(root),
+                         XDG_RUNTIME_DIR=str(runtime), FT_USER_CONFIG_HOME=str(root / "missing"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for app in ("ft-display-settings", "ft-input-settings", "ft-remote-displays"):
+                text = (runtime / "frametop-apps" / "applications" / f"{app}.desktop").read_text()
+                self.assertIn(str(SESSION / ".."), text)
+                self.assertNotIn("frametop-api", text)
 
     def test_quickshell_absence_does_not_fail(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -177,7 +206,7 @@ class FrameDesktopTests(unittest.TestCase):
             bindir = root / "bin"
             bindir.mkdir()
             tool = '#!/bin/sh\necho "$0 $*" >> "$FT_TEST_LOG"\necho "runtime=$XDG_RUNTIME_DIR sig=$HYPRLAND_INSTANCE_SIGNATURE config=$XDG_CONFIG_HOME" >> "$FT_TEST_LOG"\n'
-            for name in ("hyprctl", "qs", "foot", "dolphin", "google-chrome-stable"):
+            for name in ("hyprctl", "qs", "kitty", "foot", "dolphin", "google-chrome-stable"):
                 path = bindir / name
                 path.write_text(tool)
                 path.chmod(0o755)
@@ -201,7 +230,7 @@ class FrameDesktopTests(unittest.TestCase):
                 "terminal": None,
                 "files": None,
                 "browser": None,
-                "launcher": "-c ii ipc --any-display call search toggle",
+                "launcher": "-c ii ipc call search toggle",
             }
             for action, line in expected.items():
                 with self.subTest(action=action):
@@ -215,7 +244,7 @@ class FrameDesktopTests(unittest.TestCase):
                     if line:
                         self.assertIn(line, text)
                     elif action == "terminal":
-                        self.assertIn("foot", text)
+                        self.assertIn("kitty", text)
                     elif action == "files":
                         self.assertIn("dolphin", text)
                     else:
@@ -316,8 +345,23 @@ class FrameDesktopTests(unittest.TestCase):
         self.assertTrue(hyprland_key_forward.allowed(b"click frametop.screen.1"))
         self.assertTrue(hyprland_key_forward.allowed(b"chord-click 1"))
         self.assertTrue(hyprland_key_forward.allowed(b"up"))
+        self.assertTrue(hyprland_key_forward.allowed(b"toggle"))
+        self.assertTrue(hyprland_key_forward.allowed(b"hide"))
+        self.assertTrue(hyprland_key_forward.allowed(b"show"))
+        self.assertTrue(hyprland_key_forward.allowed(b"pause on"))
+        self.assertTrue(hyprland_key_forward.allowed(b"visibility always"))
+        self.assertTrue(hyprland_key_forward.allowed(b"get 1"))
+        self.assertTrue(hyprland_key_forward.allowed(b"remotes"))
+        self.assertTrue(hyprland_key_forward.allowed(b"ext api"))
+        self.assertTrue(hyprland_key_forward.allowed(b"debug"))
+        self.assertTrue(hyprland_key_forward.allowed(b"screens"))
         self.assertFalse(hyprland_key_forward.allowed(b"size 1 1280 720"))
-        self.assertFalse(hyprland_key_forward.allowed(b"pause on"))
+        self.assertFalse(hyprland_key_forward.allowed(b"place 1 0 0 0 0 0 0"))
+        self.assertFalse(hyprland_key_forward.allowed(b"float 9 0.001 0 0 1 1 title"))
+        self.assertFalse(hyprland_key_forward.wants_reply(b"key 28 1"))
+        self.assertFalse(hyprland_key_forward.wants_reply(b"click frametop.screen.1"))
+        self.assertTrue(hyprland_key_forward.wants_reply(b"get 1"))
+        self.assertTrue(hyprland_key_forward.wants_reply(b"toggle"))
 
 
 if __name__ == "__main__":

@@ -243,7 +243,8 @@ GAZE_ACTIONS = ("gaze_toggle", "gaze_precision", "gaze_drag", "gaze_left", "gaze
 # you (ft-screens' lazy susan); not Meta+Tab, which is Cmd+Tab on a Mac reached through a remote
 # desktop like RustDesk.
 DEFAULT_KEY_BINDINGS = {"125": "steam_menu", "125+36": "gaze_left", "125+37": "gaze_right",
-                        "42+125+33": "float_toggle", "56+125+15": "spin_next", "42+56+125+15": "spin_prev"}
+                        "42+125+33": "float_toggle", "56+125+15": "spin_next", "42+56+125+15": "spin_prev",
+                        "42+125+35": "screens_toggle", "42+125+19": "layout_reset"}
 KEY_F24 = 194  # sent to the desktop with a Meta combination (see the top)
 # Key combinations ("key_bindings"): modifiers, each side's code folded into the left one's.
 MODIFIERS = {29: 29, 97: 29, 42: 42, 54: 42, 56: 56, 100: 56, 125: 125, 126: 125}
@@ -258,11 +259,17 @@ SCREENS = "\0" + os.environ.get("FT_CONTROL_SOCKET", "ft_screens")
 # Set by "keyboard hyprland" from the experimental compositor. Plasma keeps using
 # "keyboard desktop" / "keyboard steam" and does not clear this.
 HYPRLAND_UNTIL = 0.0
+HYPRLAND_CONTROL = ""
 
 
 def set_hyprland_until(until):
     global HYPRLAND_UNTIL
     HYPRLAND_UNTIL = until
+
+
+def set_hyprland_control(name):
+    global HYPRLAND_CONTROL
+    HYPRLAND_CONTROL = name or ""
 
 
 def hyprland_focused(now=None):
@@ -272,8 +279,10 @@ def hyprland_focused(now=None):
 
 
 def desktop_addr():
-    """Hyprland while that panel has focus. Plasma's compositor keeps @ft_screens."""
+    """The compositor the laser is on. Plasma's compositor keeps @ft_screens."""
     route = desktop_route.live_route()
+    if hyprland_focused() and HYPRLAND_CONTROL:
+        return "\0" + HYPRLAND_CONTROL
     if route and (hyprland_focused() or not desktop_route.plasma_running()):
         return "\0" + route["control"]
     return SCREENS
@@ -905,9 +914,11 @@ def main():
             return
         chord_box["armed"] = armed
         target = desktop_route.live_route()
-        if target:
-            chord_box["control"] = "\0" + target["control"]
-        addr = chord_box["control"] if target else (None if armed else chord_box.get("control"))
+        pointed = HYPRLAND_CONTROL if hyprland_focused() and HYPRLAND_CONTROL else ""
+        control = pointed or (target["control"] if target else "")
+        if control:
+            chord_box["control"] = "\0" + control
+        addr = chord_box["control"] if control else (None if armed else chord_box.get("control"))
         sock = pipes.get("screens")
         message = b"chord-click 1" if armed else b"chord-click 0"
         if sock is None or not addr:
@@ -1086,8 +1097,13 @@ def main():
                 log(action)
         elif action.startswith(COMMAND):
             if value == 1:
+                env = dict(os.environ, PATH=COMMAND_PATH)
+                pointed = HYPRLAND_CONTROL if hyprland_focused() and HYPRLAND_CONTROL else ""
+                route_file = desktop_route.route_file_for_control(pointed)
+                if route_file:
+                    env["FT_HYPR_ROUTE"] = route_file
                 subprocess.Popen(["sh", "-c", action[len(COMMAND):]], stdin=subprocess.DEVNULL,
-                                 env=dict(os.environ, PATH=COMMAND_PATH), start_new_session=True)
+                                 env=env, start_new_session=True)
                 log(action)
         elif action in FLOAT_ACTIONS:
             if value == 1:
@@ -1388,11 +1404,17 @@ def main():
             try:
                 if cmd == "keyboard":
                     # From ft-screens (unbound, no reply): where typing goes, repeated every second.
-                    # "hyprland" is the experimental compositor. Plasma still says desktop or steam.
+                    # "hyprland <control>" is the panel under the laser. An unnamed
+                    # "hyprland" is the older compositor and keeps the default route.
                     if len(words) > 1 and words[1] == "hyprland":
-                        on = (len(words) < 3 or words[2] != "0") and not pause.paused
                         was = hyprland_focused(now)
-                        set_hyprland_until(now + 3.0 if on else 0.0)
+                        if pause.paused:
+                            claim = {"until": 0, "control": ""}
+                        else:
+                            claim = desktop_route.keyboard_claim(
+                                {"until": HYPRLAND_UNTIL, "control": HYPRLAND_CONTROL}, words, now)
+                        set_hyprland_until(claim["until"])
+                        set_hyprland_control(claim["control"])
                         if was != hyprland_focused(now):
                             state["hyprland_was"] = hyprland_focused(now)
                             if not hyprland_focused(now):

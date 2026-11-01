@@ -6,7 +6,29 @@ here=$(dirname "$(readlink -f "$0")")
 cfg=${FT_QS_CONFIG:-ii}
 config_home=${FT_USER_CONFIG_HOME:-$HOME/.config}
 shell=$config_home/quickshell/$cfg/shell.qml
+# Older installed stages need the same session-scoped process handling.
+if [ -f "$shell" ]; then
+  python3 "$here/stage-end4.py" --prepare-session "$config_home" || exit 1
+fi
 export XDG_CONFIG_HOME=$config_home
+# The session's XDG_DATA_HOME is a Frametop directory, so the launcher does not
+# see the normal application directories. The host image comes first: the
+# copy of Steam in ~/.local/share is marked hidden and would otherwise cover
+# the visible one. Frametop settings and installed games still come from
+# ~/.local/share, which has no host copy of those names.
+# Shadow the host's older Plasma launchers only in this nested session. The
+# private runtime disappears with the session and leaves Plasma's entries alone.
+entry_dir=${XDG_RUNTIME_DIR:?}/frametop-apps/applications
+mkdir -p "$entry_dir"
+for app in display-settings/ft-display-settings input-settings/ft-input-settings \
+           remote-displays/ft-remote-displays; do
+  name=${app##*/}
+  template=$here/../$app.desktop
+  if [ -f "$template" ] && [ -x "$here/../$app" ]; then
+    sed "s|@REPO@|$here/..|g" "$template" > "$entry_dir/$name.desktop"
+  fi
+done
+export XDG_DATA_DIRS="$XDG_RUNTIME_DIR/frametop-apps:/run/host/usr/share:$HOME/.local/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
 if [ -f "$shell" ] && [ -x "$here/frame-theme.sh" ]; then
   theme_env=$("$here/frame-theme.sh" "$config_home" || true)
   if [ -n "${theme_env:-}" ]; then
@@ -14,6 +36,9 @@ if [ -f "$shell" ] && [ -x "$here/frame-theme.sh" ]; then
     eval "$theme_env"
     if [ -n "${FONTCONFIG_FILE:-}" ]; then
       export FONTCONFIG_FILE
+    fi
+    if [ -n "${FT_FRAME_FONT_MATERIAL:-}" ]; then
+      export FT_FRAME_FONT_MATERIAL
     fi
   fi
 fi

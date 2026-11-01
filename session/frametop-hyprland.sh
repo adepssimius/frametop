@@ -56,7 +56,15 @@ PIPEWIRE_RUNTIME_DIR=
 PULSE_SERVER=
 if [ -S "$host_runtime/pipewire-0" ]; then PIPEWIRE_RUNTIME_DIR=$host_runtime; fi
 if [ -S "$host_runtime/pulse/native" ]; then PULSE_SERVER=unix:$host_runtime/pulse/native; fi
-export XDG_STATE_HOME="$HOME/.local/state/frametop/hyprland"
+# An alongside session keeps its generated colors away from the installed
+# desktop. The installed session still uses the shared Hyprland state.
+if [ -n "${FT_HYPRLAND_ALONGSIDE:-}" ]; then
+  state_home=$HOME/.local/state/frametop/hyprland-exp
+else
+  state_home=$HOME/.local/state/frametop/hyprland
+fi
+mkdir -p "$state_home"
+export XDG_STATE_HOME="$state_home"
 export FT_USER_CONFIG_HOME="$config_home"
 export FT_APP_CONFIG_HOME="$HOME/.config/frametop/hyprland"
 export FT_APP_DATA_HOME="$HOME/.local/share/frametop/hyprland"
@@ -77,9 +85,10 @@ launch=(env -u HYPRLAND_INSTANCE_SIGNATURE
   XDG_RUNTIME_DIR="$runtime"
   WAYLAND_DISPLAY="$parent_wayland"
   XDG_CONFIG_HOME="$HOME/.config/frametop/hyprland"
-  XDG_STATE_HOME="$HOME/.local/state/frametop/hyprland"
+  XDG_STATE_HOME="$state_home"
   XDG_DATA_HOME="$HOME/.local/share/frametop/hyprland"
   XDG_CURRENT_DESKTOP=Hyprland
+  QT_QPA_PLATFORMTHEME=kde
   XDG_SESSION_DESKTOP=Hyprland
   XDG_SESSION_TYPE=wayland
   HYPRLAND_NO_SD_VARS=1
@@ -89,13 +98,14 @@ launch=(env -u HYPRLAND_INSTANCE_SIGNATURE
   FT_HYPR_OUTPUTS="${FT_HYPR_OUTPUTS:-$count}"
   FT_OUTPUT_NAMES="${FT_OUTPUT_NAMES:-1}"
   FT_HYPR_CONTROL="${FT_HYPR_CONTROL:-${FT_HYPRLAND_CONTROL:-ft_hyprland}}"
+  FT_HOST_RUNTIME="$host_runtime"
   FT_HYPRLAND_STARTUP="$here/hyprland-on-start.sh"
   FT_FRAME_SESSION="$here"
   FT_USER_CONFIG_HOME="$config_home"
   FT_APP_CONFIG_HOME="$HOME/.config/frametop/hyprland"
   FT_APP_DATA_HOME="$HOME/.local/share/frametop/hyprland"
   FT_HYPR_CONFIG_ROOT="$hypr_root"
-  PATH="$here/bin:${PATH:-/usr/local/bin:/usr/bin}")
+  PATH="$here/../build/end4/bin:$here/bin:${PATH:-/usr/local/bin:/usr/bin}")
 if [ -n "$PIPEWIRE_RUNTIME_DIR" ]; then launch+=(PIPEWIRE_RUNTIME_DIR="$PIPEWIRE_RUNTIME_DIR"); fi
 if [ -n "$PULSE_SERVER" ]; then launch+=(PULSE_SERVER="$PULSE_SERVER"); fi
 if [ -n "${FONTCONFIG_FILE:-}" ]; then launch+=(FONTCONFIG_FILE="$FONTCONFIG_FILE"); fi

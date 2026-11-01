@@ -68,6 +68,8 @@
 #include "controller-click.h"
 #include "chord-click.h"
 #include "output-bind.h"
+#include "keyboard-focus.h"
+#include "pointer-map.h"
 #include "remote.h"
 #include "relay-buttons.h"
 
@@ -305,8 +307,24 @@ static void screen_commit(struct wl_listener *l, void *data) {
         // A Hyprland output may commit before its monitor name is claimed.
         // The size goes out once the slot is known. KWin is already in a slot.
         if (sc->server->output_names) {
+            // The slot may still be unknown. Hyprland does not finish creating
+            // the output until this toplevel is configured, and the claim waits
+            // for that output, so a parked window still gets a size here.
             sc->need_size = true;
-            if (sc->index >= 0) apply_screen_size(sc);
+            if (sc->index >= 0) {
+                apply_screen_size(sc);
+            } else {
+                const struct config *c = &sc->server->config[0];
+                int w = 1920, h = 1080;
+                if (sc->server->n_config > 0 && c->width >= 320 && c->height >= 200) {
+                    w = c->width;
+                    h = c->height;
+                }
+                wlr_xdg_toplevel_set_size(sc->toplevel, w, h);
+                wlr_xdg_toplevel_set_activated(sc->toplevel, true);
+                if (sc->decoration)
+                    wlr_xdg_toplevel_decoration_v1_set_mode(sc->decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+            }
             return;
         }
         // First commit: tell KWin the size of this screen.
@@ -486,6 +504,8 @@ static void relay_say(struct server *s, const char *msg) {
            offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
 }
 
+static void note_pointer_slot(struct server *s);
+
 static void handle_vr_event(const struct ft_event *e, void *data) {
     struct server *s = data;
     if (e->type == FT_QUIT) {
@@ -592,11 +612,34 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
                     }
                 }
             }
+            // Hyprland treats the absolute pointer as a fraction of the whole
+            // monitor row. Send the surface x that lands on this screen.
+            if (s->output_names && sc->index >= 0 && sc->index < s->n_config) {
+                double widths[24], heights[24];
+                int present[24];
+                int n = s->n_config < 24 ? s->n_config : 24;
+                for (int i = 0; i < n; ++i) {
+                    double scale = s->scale[i] > 0 ? s->scale[i] : 1;
+                    widths[i] = s->config[i].width / scale;
+                    heights[i] = s->config[i].height / scale;
+                    present[i] = s->screens[i] != NULL;
+                }
+                ft_pointer_for_row(n, widths, heights, present, sc->index, &x, &y);
+            }
             if (s->pointer_focus != sc) {
                 wlr_seat_pointer_notify_enter(s->seat, surface, x + 1, y);
                 s->pointer_focus = sc;
             }
             wlr_seat_pointer_notify_motion(s->seat, t, x, y);
+            // On Hyprland, the panel most recently pointed at remains the
+            // keyboard target after the laser leaves the desktop. A click on
+            // another SteamVR overlay still clears keys_clicked below.
+            if (s->output_names) {
+                s->keys_clicked = true;
+                set_key_remote(s, -1);
+                if (s->seat->keyboard_state.focused_surface != surface)
+                    wlr_seat_keyboard_notify_enter(s->seat, surface, NULL, 0, NULL);
+            }
             if (e->type == FT_BUTTON) {
                 wlr_seat_pointer_notify_button(s->seat, t, e->button,
                                                e->pressed ? WL_POINTER_BUTTON_STATE_PRESSED
@@ -641,6 +684,7 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
         default:
             break;
     }
+    note_pointer_slot(s);
     wlr_seat_pointer_notify_frame(s->seat);
 }
 
@@ -648,13 +692,38 @@ static void handle_vr_event(const struct ft_event *e, void *data) {
 // desktop, the relay grabs pass-through keyboards so SteamVR (and the Steam app with
 // gamescope's focus) doesn't get the keys too. Without word from us for a few seconds,
 // the relay gives the keyboards back, so a closed desktop doesn't keep them.
+static char focus_control[64];
+static int pointer_slot_sent = -1;
+
+static void note_pointer_slot(struct server *s) {
+    if (!s->output_names || !focus_control[0]) return;
+    int slot = 0;
+    if (s->pointer_focus && s->pointer_focus->index >= 0) slot = s->pointer_focus->index + 1;
+    if (slot == pointer_slot_sent) return;
+    pointer_slot_sent = slot;
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    if (!runtime || !runtime[0]) return;
+    char path[256], tmp[280];
+    snprintf(path, sizeof path, "%s/frametop-pointer-%s", runtime, focus_control);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", slot);
+    fclose(f);
+    rename(tmp, path);
+}
+
 static void keys_update(struct server *s) {
     if (!s->vr || s->beside) return;  // a test instance leaves the running desktop's keyboards alone
     // This binary is the experimental session. "keyboard hyprland" is its own focus.
     // It must not send "keyboard steam": Plasma's compositor shares that signal, and
     // a steam message from here would take the keyboard away from Plasma.
-    const bool desktop = s->keys_clicked && ft_vr_screens_shown() && !ft_vr_steam_in_front();
+    // A Hyprland panel claims the keyboard when pointed at and retains that
+    // target after leaving, until another overlay takes focus.
     const uint32_t t = now_ms();
+    const bool pointed = s->output_names && s->pointer_focus != NULL;
+    const bool desktop = ft_desktop_keyboard_wanted(pointed, s->keys_clicked,
+                                                      ft_vr_screens_shown(), ft_vr_steam_in_front());
     if (desktop == s->keys_desktop && t - s->relay_sent < 1000) return;
     if (desktop != s->keys_desktop) wlr_log(WLR_INFO, "typing goes to %s", desktop ? "Hyprland" : "elsewhere");
     s->keys_desktop = desktop;
@@ -662,7 +731,11 @@ static void keys_update(struct server *s) {
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     const char name[] = "frametop_relay";
     memcpy(addr.sun_path + 1, name, sizeof name - 1);
-    const char *msg = desktop ? "keyboard hyprland" : "keyboard hyprland 0";
+    char msg[96];
+    if (s->output_names && focus_control[0])
+        snprintf(msg, sizeof msg, desktop ? "keyboard hyprland %s" : "keyboard hyprland 0 %s", focus_control);
+    else
+        snprintf(msg, sizeof msg, "keyboard hyprland%s", desktop ? "" : " 0");
     sendto(s->relay_fd, msg, strlen(msg), MSG_DONTWAIT, (struct sockaddr *)&addr,
            offsetof(struct sockaddr_un, sun_path) + 1 + sizeof name - 1);
 }
@@ -1183,6 +1256,7 @@ int main(int argc, char **argv) {
             socket_name = argv[++i];
         } else if (strcmp(argv[i], "--control") == 0 && i + 1 < argc) {
             control_name = argv[++i];
+            snprintf(focus_control, sizeof focus_control, "%s", control_name);
         } else if (strcmp(argv[i], "--spares") == 0 && i + 1 < argc) {
             s.spares = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-vr") == 0) {

@@ -50,7 +50,33 @@ for the staged shell. `session/frame-kde-theme.py` writes a KDE color
 scheme and GTK icon settings into `~/.config/frametop/hyprland` and
 `~/.local/share/frametop/hyprland`. `session/bin/dolphin` is ahead of
 `/usr/bin` on the session `PATH` and points Dolphin at those directories
-with `QT_QPA_PLATFORMTHEME=kde`. Host Plasma keeps `~/.config`.
+with `QT_QPA_PLATFORMTHEME=kde`. The nested session also selects the KDE
+platform theme for apps launched directly from desktop entries, including
+Frametop settings. Host Plasma keeps `~/.config`.
+
+The terminal is Kitty, as in the laptop's shell actions. The container
+includes Kitty and Fish; `session/kitty.conf` and `session/fish/config.fish`
+seed the session's config once, and end-4 generates its wallpaper-derived
+terminal colors. The Fish config uses `eza` for `ls` and initializes Starship
+when available. `session/fish/starship.toml` mirrors the laptop prompt settings,
+and `session/build-end4-tools.sh` supplies a pinned aarch64 Starship binary. `foot` remains
+a fallback if Kitty is unavailable.
+
+The container also includes `btop` (task-manager fallback), `tesseract` with
+English data (OCR), `wf-recorder` (recording), and `fuzzel` (launcher fallback).
+The upstream dependency inventory also names `cava`, `swappy`,
+`translate-shell`, and `wtype`; the container includes those too. Their
+installation alone does not validate the corresponding shell actions.
+The pinned tools build also compiles `hyprpicker` and `mpvpaper` from source.
+`hyprsunset` and the SongRec CLI are also built from pinned sources;
+Hyprsunset uses a private Hyprlang and protocol build to avoid changing the
+container's Hyprland libraries. The isolated no-VR test found the color-transform protocol, but a second
+night-filter client reported an existing manager and its control socket did
+not answer. The shell integration and visual effect still need verification. The session-local `ydotool` key adapter sends end-4's keyboard events to
+Frametop without a host daemon; it still needs headset validation.
+Kitty's search kitten is seeded with the session configuration. Network,
+Bluetooth, Polkit, portal-dependent screen capture, and the other intentionally
+changed services below still need separate session-level verification.
 
 A wallpaper change runs `matugen` from the container (Fedora's 3.1.0 build;
 it accepts the same templates and scheme names as the laptop's 4.2.0).
@@ -63,7 +89,8 @@ paths are the host config, and it does not run the laptop's pywalfox or
 sddm hooks. Quickshell watches that `colors.json` and repaints.
 
 `frame-kde-theme.py` then writes `FrametopEnd4.colors` and `kdeglobals`
-into the session directories Dolphin already uses. `ColorSchemeHash` is
+into the session directories Dolphin already uses, including the active color
+groups in `kdeglobals`. Existing unrelated KDE settings are preserved. `ColorSchemeHash` is
 the SHA1 of the scheme file, which is what KDE compares when a running
 app decides to reload. The color virtualenv lives at
 `~/.local/share/frametop/hyprland/color-venv`. It is created in the
@@ -125,3 +152,7 @@ Offline: `python3 -m unittest session.tests.test_stage_end4 session.tests.test_f
 On the Frame, after `setup/dev-container.sh`: the new commands resolve
 inside `dev`, and a `--no-vr` smoke must leave `kded6` running. Do not
 restart the input relay or open a headset session until that is approved.
+
+Frametop settings entries in the nested launcher resolve to the same release
+as the running Hyprland session. Input Settings lists profiles from the
+Hyprland layout there; Plasma keeps its own profiles and launchers.

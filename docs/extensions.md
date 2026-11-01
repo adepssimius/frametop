@@ -9,7 +9,7 @@ overlay handles. External programs can use this interface without patching
 ## Transport and discovery
 
 The interface uses the existing Frametop control socket: abstract Linux
-`AF_UNIX / SOCK_DGRAM` `@ft_screens`. Bind your own *different* abstract
+`AF_UNIX / SOCK_DGRAM` `@ft_hyprland` when the Hyprland desktop is up, otherwise `@ft_screens`. Bind your own *different* abstract
 address before sending so the compositor can reply. Commands and replies are
 UTF-8, one command per datagram. Every reply begins with `ok` or `error`.
 

@@ -34,6 +34,8 @@ test-c:
     #!/usr/bin/env bash
     set -e
     mkdir -p build/tests
+    gcc -std=c11 -Wall -Wextra -Werror screens/tests/keyboard-focus-test.c -o build/tests/keyboard-focus-test
+    build/tests/keyboard-focus-test && echo "screens/tests/keyboard-focus-test.c: ok"
     gcc -std=c11 -Wall -Wextra -Werror -I. screens/tests/controller-click-test.c \
       -lm -o build/tests/controller-click-test
     build/tests/controller-click-test && echo "screens/tests/controller-click-test.c: ok"

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ft_ext import ExtensionError, Frametop  # noqa: E402
+from ft_ext import ExtensionError, Frametop, live_control  # noqa: E402
 
 
 class ExtensionClientTest(unittest.TestCase):
@@ -68,6 +68,9 @@ class ExtensionClientTest(unittest.TestCase):
                    lambda: c.request("ext api\nbad")):
             with self.assertRaises(ValueError):
                 fn()
+
+    def test_live_control_keeps_an_explicit_socket(self):
+        self.assertEqual(live_control("ft-ext-test"), "ft-ext-test")
 
     def test_non_compositor_timeout(self):
         with self.assertRaises(ExtensionError):

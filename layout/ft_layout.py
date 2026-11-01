@@ -112,6 +112,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 LAYOUT_PATH = os.path.expanduser("~/.config/frametop-layout.json")
 CONF_PATH = os.path.expanduser("~/.config/frametop.conf")
@@ -175,6 +176,12 @@ def screen_count(layout=None):
 
 
 def load_layout():
+    if hyprland_desktop_up():
+        session = os.path.join(REPO, "session")
+        if session not in sys.path:
+            sys.path.insert(0, session)
+        import hyprland_layout  # noqa: E402
+        return hyprland_layout.load()
     layout = json.loads(json.dumps(DEFAULTS))
     try:
         with open(LAYOUT_PATH) as f:
@@ -189,6 +196,12 @@ def load_layout():
 
 
 def save_layout(layout):
+    if hyprland_desktop_up():
+        session = os.path.join(REPO, "session")
+        if session not in sys.path:
+            sys.path.insert(0, session)
+        import hyprland_layout  # noqa: E402
+        return hyprland_layout.save(layout)
     os.makedirs(os.path.dirname(LAYOUT_PATH), exist_ok=True)
     tmp = LAYOUT_PATH + ".tmp"
     with open(tmp, "w") as f:
@@ -428,8 +441,39 @@ class Socket:
 
 # ---------------------------------------------------------------- ft-screens
 
+def hyprland_desktop_up():
+    """True when the Hyprland VR compositor is the desktop on this machine."""
+    uid = os.getuid()
+    return os.path.exists(f"/run/user/{uid}/ft-hyprland-0")
+
+
+def screens_control_addr():
+    """Abstract address of the compositor that is drawing the VR screens.
+
+    Hide/Show Screens, pause, and ft-layout talk here. The Hyprland desktop
+    listens on its own name, not @ft_screens.
+    """
+    name = os.environ.get("FT_CONTROL_SOCKET", "")
+    if name:
+        return ("\0" + name).encode()
+    if hyprland_desktop_up():
+        control = os.environ.get("FT_HYPRLAND_CONTROL") or os.environ.get("FT_HYPR_CONTROL") or "ft_hyprland"
+        route = Path(f"/run/user/{os.getuid()}") / "frametop-hyprland.route"
+        try:
+            for line in route.read_text(encoding="utf-8").splitlines():
+                if line.startswith("control="):
+                    got = line.split("=", 1)[1].strip()
+                    if got and got.replace("_", "").replace("-", "").isalnum():
+                        control = got
+                        break
+        except OSError:
+            pass
+        return ("\0" + control).encode()
+    return SCREENS.encode() if isinstance(SCREENS, str) else SCREENS
+
+
 def screens_socket():
-    return Socket(SCREENS, "ft-screens (the desktop's compositor) isn't running or")
+    return Socket(screens_control_addr(), "ft-screens (the desktop's compositor) isn't running or")
 
 
 def screen_args(layout=None):
@@ -1122,12 +1166,26 @@ def remote_command(args):
 
 
 def apply(wait=0):
+    if hyprland_desktop_up():
+        session = os.path.join(REPO, "session")
+        if session not in sys.path:
+            sys.path.insert(0, session)
+        import hyprland_layout  # noqa: E402
+        extra = ["--wait", str(wait)] if wait else []
+        return hyprland_layout.cli(["ft-layout", "apply", *extra])
     return apply_screens(wait) if backend() == "screens" else apply_gamescope(wait)
 
 
 def capture():
     """Where the screens are now as the custom layout. It's no longer a named one's until
     `save NAME` (placed by hand since)."""
+    if hyprland_desktop_up():
+        session = os.path.join(REPO, "session")
+        if session not in sys.path:
+            sys.path.insert(0, session)
+        import hyprland_layout  # noqa: E402
+        hyprland_layout.cli_capture()
+        return hyprland_layout.screens_by_slot(hyprland_layout.load())
     screens = capture_screens() if backend() == "screens" else capture_gamescope()
     layout = load_layout()
     if layout.pop("active", None) is not None:
@@ -1531,6 +1589,14 @@ def main(argv):
         return 0 if len(argv) >= 2 else 2
     cmd = argv[1]
     try:
+        if hyprland_desktop_up() and cmd not in ("-h", "--help"):
+            session = os.path.join(REPO, "session")
+            if session not in sys.path:
+                sys.path.insert(0, session)
+            import hyprland_layout  # noqa: E402
+            code = hyprland_layout.cli(argv)
+            if code is not None:
+                return code
         if cmd == "plan":
             layout = load_layout()
             print(json.dumps(plan(layout, screen_count(layout))))

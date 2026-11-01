@@ -28,6 +28,12 @@ import time
 
 RELAY = "\0frametop_relay"
 SCREENS = "\0ft_screens"
+
+
+def screens_addr():
+    if os.path.exists(f"/run/user/{os.getuid()}/ft-hyprland-0"):
+        return "\0" + os.environ.get("FT_HYPRLAND_CONTROL", "ft_hyprland")
+    return SCREENS
 EVENT = struct.Struct("llHHi")
 EV_KEY = 0x01
 KEYS = {1: "Esc", 15: "Tab", 29: "LeftCtrl", 42: "LeftShift", 54: "RightShift", 56: "LeftAlt",
@@ -116,7 +122,7 @@ def main():
     except OSError:
         out("Settings: no ~/.config/frametop.conf")
     out("ft-screens state (visibility, manual, wrist, gesture, lasers, game running, in games): "
-        + ask(SCREENS, "state"))
+        + ask(screens_addr(), "state"))
 
     out("\n===== Input devices (programs with the node open)")
     opened = openers()

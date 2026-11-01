@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Forward end-4's keyboard commands to this session's Frametop compositor.
+
+The desktop needs no ydotool daemon or host uinput device. Only `key` is
+supported; other ydotool operations are not silently redirected.
+"""
+import os
+import re
+import socket
+import sys
+
+
+def parse(argv):
+    if not argv or argv[0] != "key":
+        raise ValueError("only ydotool key is available in Frametop")
+    events = []
+    args = iter(argv[1:])
+    for arg in args:
+        if arg in ("-d", "--key-delay"):
+            try:
+                delay = next(args)
+            except StopIteration:
+                raise ValueError("missing key delay") from None
+            if not delay.isdigit():
+                raise ValueError("invalid key delay")
+            continue
+        match = re.fullmatch(r"(\d+):([01])", arg)
+        if not match or int(match.group(1)) > 248:
+            raise ValueError(f"invalid key event: {arg}")
+        events.append((int(match.group(1)), int(match.group(2))))
+    if not events:
+        raise ValueError("no key events")
+    return events
+
+
+def main(argv):
+    name = os.environ.get("FT_HYPR_CONTROL") or os.environ.get("FT_HYPRLAND_CONTROL") or "ft_hyprland"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+        raise ValueError("invalid compositor control name")
+    events = parse(argv)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        for code, state in events:
+            sock.sendto(f"key {code} {state}".encode(), b"\0" + name.encode())
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (OSError, ValueError) as exc:
+        print(f"frametop: {exc}", file=sys.stderr)
+        raise SystemExit(1)

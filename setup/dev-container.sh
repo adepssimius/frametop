@@ -39,7 +39,7 @@ packages=(
   # Firefox are the file manager and browser the controller chords launch,
   # and the icon themes give Quickshell a fallback icon. The shell's named
   # fonts are staged beside the config, not installed on the host.
-  dolphin firefox hicolor-icon-theme breeze-icon-theme
+  dolphin firefox kitty fish foot pavucontrol eza btop tesseract tesseract-langpack-eng wf-recorder fuzzel hicolor-icon-theme breeze-icon-theme
   google-noto-sans-fonts google-noto-sans-mono-fonts wl-clipboard
   # end-4 tools. These are clients and generators, not host services:
   # jq and the image tools run the wallpaper and color scripts, cliphist
@@ -47,6 +47,9 @@ packages=(
   # grim/slurp take a panel shot. NetworkManager, BlueZ, and UPower are
   # not installed here; the container cannot attach to SteamOS's system bus.
   jq qalculate playerctl grim slurp libnotify cliphist python3-pillow
+  cava swappy translate-shell wtype
+  pango-devel cairo-devel libjpeg-turbo-devel mpv-devel hyprland-protocols-devel
+  libsoup3-devel glib2-devel gettext-devel alsa-lib-devel
   xdg-user-dirs ffmpeg-free iw
   # end-4's "Choose file" wallpaper button runs kdialog. The thumbnail
   # plugins are what turn that list into pictures. Upscayl is not packaged

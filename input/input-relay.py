@@ -1920,6 +1920,8 @@ def main():
                     # From ft-screens (unbound, no reply): where typing goes, repeated every second.
                     # "hyprland <control>" is the panel under the laser. An unnamed
                     # "hyprland" is the older compositor and keeps the default route.
+                    if uid == os.getuid():
+                        pause.screens_seen(pid)  # a desktop started while paused hides too
                     if len(words) > 1 and words[1] == "hyprland":
                         if words[-1] in ("shown=0", "shown=1"):
                             state["hyprland_shown_until"] = now + 3.0 if words[-1] == "shown=1" else 0.0
@@ -1941,8 +1943,6 @@ def main():
                     desktop = len(words) > 1 and words[1] == "desktop" and not pause.paused
                     state["desktop_until"] = now + 3.0 if desktop else 0.0
                     state["shown_until"] = now + 3.0 if len(words) > 2 and words[2] == "1" else 0.0
-                    if uid == os.getuid():
-                        pause.screens_seen(pid)  # a desktop started while paused hides too
                     continue
                 if cmd == "vrbtn" and len(words) == 3 and words[1] in VR_BUTTONS and words[2] in ("0", "1"):
                     vr_button(words[1], int(words[2]), now)

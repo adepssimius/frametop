@@ -44,6 +44,7 @@ class StubPause:
 
     def __init__(self, log, on_change, buttons):
         self.on_change = on_change
+        self.screens_seen_pids = []
         stub["pause"] = self
 
     def toggle(self, reason, now):
@@ -63,7 +64,10 @@ class StubPause:
     def configure(self, *args):
         pass
 
-    game_state = tick = helper_started = controllers_changed = set_hands = dashboard_state = screens_seen = configure
+    game_state = tick = helper_started = controllers_changed = set_hands = dashboard_state = configure
+
+    def screens_seen(self, pid):
+        self.screens_seen_pids.append(pid)
 
 
 stub = {}
@@ -312,6 +316,7 @@ def tests():
     tell = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     tell.sendto(b"keyboard hyprland", f"\0{tag}_relay")
     time.sleep(0.05)
+    check("Hyprland compositor reports in for pause synchronization", stub["pause"].screens_seen_pids[-1:], [os.getpid()])
     key(META, 1); key(META, 0)
     check("Hyprland focus: Meta is not the Steam menu", lines(steam_log), ["menu"])
     check("Hyprland focus: Meta reaches the desktop", typed(), ["key 125 1", "key 125 0"])

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# The desktop runs in Distrobox while tailscaled runs on the SteamOS host.
+set -e
+cli=$HOME/.local/bin/tailscale
+if [ ! -x "$cli" ]; then
+  echo 'Tailscale is not installed for this user.' >&2
+  exit 127
+fi
+if [ -S /run/host/run/tailscale/tailscaled.sock ]; then
+  exec "$cli" --socket=/run/host/run/tailscale/tailscaled.sock "$@"
+fi
+exec "$cli" "$@"

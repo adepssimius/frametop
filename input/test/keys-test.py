@@ -105,6 +105,7 @@ relay.Volume.key = lambda self, fd, code, value, now: VOLUME.append((code, value
 LOG = []  # the relay's own log
 relay.log = lambda *args: LOG.append(" ".join(map(str, args)))
 bindings = {"now": None}  # the rules' key_bindings; None: the relay's defaults
+chord_spec = {"now": None}
 devices = {"roles": {}, "buttons": {}}  # the rules' "devices" roles and per-device "buttons"
 vr_keyboard = {"mode": None}  # the rules' vr_keyboard (Frametop's keyboard); None: the default
 MOUSE_ID = "usb:0003:0004:test mouse"  # the fake mouse's id (Node.id)
@@ -114,6 +115,8 @@ def read_rules(path=None):
     rules = {"devices": {i: {"role": r} for i, r in devices["roles"].items()},
              "buttons": {i: dict(b) for i, b in devices["buttons"].items()}, "controller_buttons": {}}
     rules["key_bindings"] = dict(relay.DEFAULT_KEY_BINDINGS if bindings["now"] is None else bindings["now"])
+    if chord_spec["now"] is not None:
+        rules["controller_chords"] = chord_spec["now"]
     if vr_keyboard["mode"]:
         rules["vr_keyboard"] = vr_keyboard["mode"]
     return rules
@@ -837,6 +840,32 @@ def tests():
     from_kb("kbkey 30 1")
     check("gone: its keys reach nothing until it says hello again", (typed(), emitted()), ([], []))
     kb.close()
+    # Trigger+R3 is the Hyprland close shortcut. The one-controller fallback
+    # pause gesture also watches R3, so its delayed report must not pause here.
+    relay.desktop_route.live_route = lambda: {"control": tag + "_screens"}
+    relay.desktop_route.plasma_running = lambda: False
+    chord_spec["now"] = {"modifier": "right/trigger", "swallow_click": "right/thumbstick",
+                         "modified": {"right/thumbstick": "command:true"}}
+    use(None)
+    to_relay("keyboard hyprland")
+    time.sleep(0.1)
+    to_relay("vrbtn right/trigger 1")
+    time.sleep(0.1)
+    to_relay("pause toggle gesture")
+    time.sleep(0.1)
+    check("pause gesture cannot interrupt an armed Hyprland shortcut", stub["pause"].paused, False)
+    to_relay("chord-fired")
+    to_relay("vrbtn right/trigger 0")
+    time.sleep(0.1)
+    to_relay("pause toggle gesture")
+    time.sleep(0.1)
+    check("delayed pause gesture cannot interrupt the close shortcut", stub["pause"].paused, False)
+    time.sleep(1.1)
+    to_relay("pause toggle gesture")
+    time.sleep(0.1)
+    check("ordinary pause gesture still works", stub["pause"].paused, True)
+    pause("off")
+    chord_spec["now"] = None
     to_relay("keyboard steam")
     use(None)
     print("FAILED: " + ", ".join(failures) if failures else "all passed", flush=True)

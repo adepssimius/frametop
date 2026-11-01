@@ -1157,7 +1157,8 @@ def main():
              "pointer_holding": False, "vr_game": False, "calpanel_until": 0.0,
              "shown_until": 0.0, "hyprland_shown_until": 0.0,
              "kb_addr": None, "kb_until": 0.0, "kb_said": None}
-    chord_box = {"impl": controller_chords.ControllerChords(None), "armed": False, "control": None}
+    chord_box = {"impl": controller_chords.ControllerChords(None), "armed": False, "control": None,
+                 "last_swallow": 0.0}
     pipes = {}
 
     def chords_active(now):
@@ -1293,6 +1294,8 @@ def main():
             active = chords_active(now)
             for action_name in chord_box["impl"].event(button, value):
                 if active:
+                    if button == chord_box["impl"].swallow:
+                        chord_box["last_swallow"] = now
                     do_action(action_name, 1, now, hand)
             publish_chord_arm()
             return
@@ -1950,6 +1953,8 @@ def main():
                 if cmd == "chord-fired":
                     actions = chord_box["impl"].click_down()
                     log(f"chord-fired -> {actions or 'none'}")
+                    if actions:
+                        chord_box["last_swallow"] = now
                     for action_name in actions:
                         do_action(action_name, 1, now, "right")
                     continue
@@ -1973,6 +1978,15 @@ def main():
                 if cmd == "pause" and len(words) >= 2 and words[1] in ("on", "off", "toggle", "?"):
                     # From input/ft-pause, the settings app, or the gesture reader (unbound, no reply).
                     reason = words[2] if len(words) > 2 else "command"
+                    # With one controller, the default pause gesture is two R3
+                    # presses. Trigger+R3 is also the Hyprland close shortcut.
+                    # A delayed gesture report must not pause the desktop after
+                    # that shortcut, but an ordinary R3 double press still can.
+                    if (words[1] == "toggle" and reason == "gesture" and
+                            (chord_box["impl"].armed or
+                             (chord_box["last_swallow"] and now - chord_box["last_swallow"] < 1.0))):
+                        log("pause gesture ignored: controller shortcut in progress")
+                        continue
                     if words[1] == "toggle":
                         pause.toggle(reason, now)
                     elif words[1] != "?":

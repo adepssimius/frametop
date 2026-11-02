@@ -34,6 +34,7 @@ import os
 import shutil
 import socket
 import sys
+import time
 import threading
 
 from PySide6.QtCore import Property, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
@@ -44,6 +45,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYOUT_DIR = os.path.join(HERE, "..", "layout")
 sys.path.insert(0, LAYOUT_DIR)
+import ft_align  # noqa: E402  (its joins; the alignment itself runs on the host, through ft-layout)
 import ft_layout  # noqa: E402  (pure Python: the same geometry ft-layout uses)
 import steam_settings  # noqa: E402
 
@@ -107,6 +109,7 @@ class Backend(QObject):
     changed = Signal()
     busyChanged = Signal()
     powerChanged = Signal()
+    alignChanged = Signal()
     message = Signal(str, bool)  # text, is error
     _steamDone = Signal(object, object, str)  # Steam's sleep settings or None, error or None, what was done
 
@@ -759,6 +762,60 @@ class Backend(QObject):
         """Frametop Remote Displays (we're in the dev container already, as it runs)."""
         if not QProcess.startDetached(sys.executable, [os.path.abspath(REMOTE_DISPLAYS)]):
             self.message.emit("Couldn't start Frametop Remote Displays", True)
+
+    # --- monitor alignment: ft-layout align runs on the host, and answers on its own socket ---
+    @Property("QVariantMap", notify=alignChanged)
+    def alignStatus(self):
+        return getattr(self, "_align", None) or {}
+
+    @Property("QVariantList", notify=changed)
+    def alignJoins(self):
+        return ft_align.join_choices(ft_layout.load_layout())
+
+    @Slot(str, str, bool)
+    def setAlignJoin(self, a, b, on):
+        self._edit_layout(lambda l: ft_align.set_join(l, a, b, on))
+
+    @Slot()
+    def alignStart(self):
+        argv = host_command(os.path.abspath(FT_LAYOUT), "align", "start")
+        if not QProcess.startDetached(argv[0], argv[1:]):
+            return self.message.emit("Couldn't start alignment", True)
+        self._align = {"state": "starting", "displays": []}
+        self._align_since = time.time()
+        self.alignChanged.emit()
+        if not hasattr(self, "_align_poll"):
+            self._align_poll = QTimer(interval=500, timeout=self._align_check)
+        self._align_poll.start()
+
+    def _align_check(self):
+        try:
+            self._align = ft_align.ask("status")
+        except RuntimeError:
+            if time.time() - self._align_since < 15:
+                return
+            # It has gone: say how it ended, once.
+            last = self._align or {}
+            self._align = {}
+            self._align_poll.stop()
+            self.alignChanged.emit()
+            self.changed.emit()
+            if last.get("state") == "failed":
+                self.message.emit(f"Alignment failed: {last.get('message')}", True)
+            elif last.get("state") in ("done", "finishing"):
+                self.message.emit("Alignment: done", False)
+            else:
+                self.message.emit("Alignment didn't start: see ft-layout's log", True)
+            return
+        self.alignChanged.emit()
+
+    @Slot(str)
+    def alignSend(self, what):
+        """lock N, lock all, or stop."""
+        try:
+            ft_align.ask(what)
+        except RuntimeError as e:
+            self.message.emit(str(e), True)
 
     # --- ft-layout on the host ---
     def _run(self, label, *args):

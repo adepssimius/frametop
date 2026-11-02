@@ -1,5 +1,7 @@
 # Monitor alignment prototype
 
+The real version is `align/` and `layout/ft_align.py`, described in [docs/monitor-alignment.md](../../docs/monitor-alignment.md). This is the earlier Python version, kept for its capture and replay tools.
+
 This puts Frametop's remote display panels on top of the physical monitors they stream. It's a working prototype, driven by hand from a Mac; nothing in Frametop calls it yet. It's here to keep what was learned while the real feature is built.
 
 ## How it works

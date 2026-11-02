@@ -455,6 +455,13 @@ Kirigami.ApplicationWindow {
                     onTriggered: backend.arrange()
                 },
                 Kirigami.Action {
+                    text: "Align to my monitors"
+                    icon.name: "view-fullscreen"
+                    tooltip: "Put the connected displays' panels on the physical monitors they stream. Each monitor shows markers while you move your head."
+                    enabled: backend.desktopRunning && backend.busy === "" && !backend.alignStatus.state
+                    onTriggered: backend.alignStart()
+                },
+                Kirigami.Action {
                     text: "Save as profile…"
                     icon.name: "document-save"
                     tooltip: "Save where the screens are now, which ones are hidden, and the open apps and where their windows are, under a name"
@@ -473,6 +480,72 @@ Kirigami.ApplicationWindow {
 
             ColumnLayout {
                 spacing: Kirigami.Units.largeSpacing
+
+                // Monitor alignment (docs/monitor-alignment.md): each display's figure, and its lock.
+                Kirigami.AbstractCard {
+                    Layout.fillWidth: true
+                    visible: !!backend.alignStatus.state
+                    contentItem: ColumnLayout {
+                        Kirigami.Heading {
+                            level: 3
+                            text: backend.alignStatus.state === "failed" ? "Alignment failed"
+                                : backend.alignStatus.state === "aligning" ? "Aligning " + backend.alignStatus.host
+                                : backend.alignStatus.state === "starting" ? "Starting: the displays are switching to markers"
+                                : "Finishing: the displays are going back to their streams"
+                        }
+                        Controls.Label {
+                            visible: backend.alignStatus.state === "aligning"
+                            text: "Move your head slowly: a sweep across your desk, some up and down. Each panel moves to its monitor. Lock each one when it looks right."
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            visible: backend.alignStatus.state === "failed"
+                            text: backend.alignStatus.message || ""
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+                        Repeater {
+                            model: backend.alignStatus.displays || []
+                            delegate: RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                Controls.Label { text: modelData.label; Layout.fillWidth: true; elide: Text.ElideRight }
+                                Controls.Label {
+                                    text: modelData.locked ? "Locked"
+                                        : modelData.shown_mm === null || modelData.shown_mm === undefined ? modelData.hint
+                                        : "About " + Math.round(modelData.shown_mm) + " mm: " + modelData.hint
+                                    color: !modelData.locked && modelData.shown_mm < 5 ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.textColor
+                                }
+                                Controls.Button {
+                                    text: "Lock"
+                                    enabled: !modelData.locked && modelData.shown_mm !== null && modelData.shown_mm !== undefined
+                                    onClicked: backend.alignSend("lock " + modelData.panel)
+                                }
+                            }
+                        }
+                        RowLayout {
+                            visible: backend.alignStatus.state === "aligning"
+                            Controls.Button { text: "Lock all"; onClicked: backend.alignSend("lock all") }
+                            Controls.Button { text: "Stop"; onClicked: backend.alignSend("stop") }
+                        }
+                    }
+                }
+
+                // Two neighbouring monitors as one curved monitor, after aligning.
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: backend.alignJoins.length > 0
+                    Repeater {
+                        model: backend.alignJoins
+                        delegate: Controls.CheckBox {
+                            required property var modelData
+                            text: "Join " + modelData.label + " into one curved monitor when aligning"
+                            checked: modelData.joined
+                            onToggled: backend.setAlignJoin(modelData.a, modelData.b, checked)
+                        }
+                    }
+                }
 
                 Kirigami.FormLayout {
                     Layout.fillWidth: true

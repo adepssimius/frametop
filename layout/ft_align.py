@@ -11,6 +11,7 @@ Stand-alone geometry (join) needs nothing but the standard library, so tests can
 import json
 import math
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -79,12 +80,33 @@ def first_tag(display, index):
     return n * TAGS_PER_DISPLAY
 
 
-def spec_entry(number, display, index):
+def windows_first_tag(display_name):
+    """On Windows, \\\\.\\DISPLAYn shows 4(n-1) to 4(n-1)+3 (host/windows/align-markers.ps1)."""
+    found = re.search(r"DISPLAY(\d+)$", display_name)
+    if not found:
+        raise RuntimeError(f"can't tell which monitor {display_name} is")
+    return (int(found[1]) - 1) * TAGS_PER_DISPLAY
+
+
+def windows_tags(displays, monitors):
+    """Each Windows display's first tag ID, from Vibepollo's list of the PC's active monitors."""
+    names = {m["device_id"]: m.get("display_name", "") for m in monitors}
+    out = {}
+    for number, display in displays:
+        device = display["app"].partition(":")[2]
+        if device not in names:
+            raise RuntimeError(f"{display.get('label') or display['id']} isn't active on this computer: "
+                               "check that the monitor is on and showing it")
+        out[number] = windows_first_tag(names[device])
+    return out
+
+
+def spec_entry(number, display, first_id):
     w, h = display.get("size", [2560, 1440])
     known = display.get("physical")
     width = known["width_m"] if known else GUESS_WIDTH_M
     height = known["height_m"] if known else GUESS_WIDTH_M * h / w
-    return {"panel": number, "first_id": first_tag(display, index), "width_m": width, "height_m": height, "measure": not known}
+    return {"panel": number, "first_id": first_id, "width_m": width, "height_m": height, "measure": not known}
 
 
 def hint(fit):
@@ -115,6 +137,9 @@ class Session:
         self.locked, self.restored = set(), set()
         self.camd = self.align = None
         self.finish = threading.Event()
+        # Windows: one server carries every display and one app shows every monitor's markers, so one panel
+        # starts it, and the others stay live until it ends. A Mac's displays each have their own server and app.
+        self.shared = any(d["app"].startswith("display:") for _, d in displays)
 
     # ------------------------------------------------------------ the host
 
@@ -176,13 +201,25 @@ class Session:
             if "cap_sys_ptrace" not in caps:
                 return self.fail("the cameras need permission once: run hands/run.sh caps in a terminal")
             self.camd = subprocess.Popen([CAMD, "--status", "0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for number, display in self.displays:
+        spec = f"/tmp/ft-align-spec-{os.getuid()}.json"
+        if self.shared:
+            code, out, err = ft_layout.run_stream("monitors", self.host["address"])
+            if code:
+                return self.fail(f"can't list this computer's monitors: {err.strip() or out.strip()}")
+            try:
+                tags = windows_tags(self.displays, json.loads(out))
+            except RuntimeError as e:
+                return self.fail(str(e))
+            starters = self.displays[:1]
+        else:
+            tags = {n: first_tag(d, i) for i, (n, d) in enumerate(self.displays)}
+            starters = self.displays
+        for number, display in starters:
             if not self.switch(number, display, APP):
                 return self.fail(f"{display.get('label') or display['id']} didn't start the markers: "
                                  "run this computer's host setup again")
-        spec = f"/tmp/ft-align-spec-{os.getuid()}.json"
         with open(spec, "w") as f:
-            json.dump({"displays": [spec_entry(n, d, i) for i, (n, d) in enumerate(self.displays)]}, f)
+            json.dump({"displays": [spec_entry(n, d, tags[n]) for n, d in self.displays]}, f)
         self.align = subprocess.Popen([IN_BOX, FT_ALIGN, "run", spec], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, text=True, bufsize=1)
         threading.Thread(target=self.read_fits, daemon=True).start()
@@ -199,7 +236,8 @@ class Session:
             self.locked.add(number)
         self.align.stdin.write(f"lock {number}\n")
         self.align.stdin.flush()
-        threading.Thread(target=self.restore, args=(number,), daemon=True).start()
+        if not self.shared:     # one app shows them all: the streams change back once, at the end
+            threading.Thread(target=self.restore, args=(number,), daemon=True).start()
         return True
 
     def restore(self, number):
@@ -264,11 +302,16 @@ class Session:
                 self.align.wait(timeout=5)
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 self.align.kill()
-        for number, _ in self.displays:
-            self.restore(number)
+        if self.shared:
+            self.restore(self.displays[0][0])   # quitting the app drops the other panels: they reconnect themselves
+            self.restored.update(n for n, _ in self.displays)
+        else:
+            for number, _ in self.displays:
+                self.restore(number)
         end = time.time() + 20
-        while time.time() < end and len(self.restored) < len(self.displays):
-            time.sleep(0.2)
+        while time.time() < end and not all(
+                (ft_layout.remotes_running(self.sock) or {}).get(n, "").startswith("live") for n, _ in self.displays):
+            time.sleep(0.3)
         if self.camd:
             self.camd.terminate()
         if self.state != "failed":
@@ -292,16 +335,33 @@ def choose(layout, host_name):
     """The host to align: the one named, or the one whose displays are connected."""
     groups = {}
     for number, host, display in ft_layout.remote_displays(layout):
-        if not display.get("off") and (not host_name or host_name == host.get("name")):
+        physical = display.get("app") == "Desktop" or display.get("app", "").startswith("display:")   # not a virtual one
+        if physical and not display.get("off") and (not host_name or host_name == host.get("name")):
             groups.setdefault(host.get("name") or host["address"], (host, []))[1].append((number, display))
     if not groups:
-        raise RuntimeError("no connected displays to align: connect one in Frametop Remote Displays")
+        raise RuntimeError("no connected monitors to align: connect one in Frametop Remote Displays")
     if len(groups) > 1:
         raise RuntimeError("displays from several computers are connected: name one, with --host")
-    host, displays = next(iter(groups.values()))
-    if not all(d.get("app") == "Desktop" for _, d in displays):
-        raise RuntimeError("alignment doesn't support this computer's kind of display yet")
-    return host, displays
+    return next(iter(groups.values()))
+
+
+def join_choices(layout):
+    """The displays that could join, neighbours in the list: [{a, b, label, joined}]."""
+    joins = [set(j) for j in layout.get("align_joins", [])]
+    out = []
+    last = None
+    for _, host, d in ft_layout.remote_displays(layout):
+        if last and last[0] is host and not d.get("off") and not last[1].get("off"):
+            a, b = last[1], d
+            out.append({"a": a["id"], "b": b["id"], "joined": {a["id"], b["id"]} in joins,
+                        "label": f"{a.get('label') or a['id']} and {d.get('label') or d['id']}"})
+        last = (host, d)
+    return out
+
+
+def set_join(layout, a, b, on):
+    joins = [j for j in layout.get("align_joins", []) if not set(j) & {a, b}]
+    layout["align_joins"] = joins + ([[a, b]] if on else [])
 
 
 def serve(session):
@@ -396,8 +456,7 @@ def command(args):
         print(json.dumps(ask("stop")))
     elif what == "join" and len(args) == 3:
         layout = ft_layout.load_layout()
-        joins = [j for j in layout.get("align_joins", []) if not set(j) & set(args[1:])]
-        layout["align_joins"] = joins + [args[1:]]
+        set_join(layout, args[1], args[2], True)
         ft_layout.save_layout(layout)
     elif what == "unjoin":
         layout = ft_layout.load_layout()

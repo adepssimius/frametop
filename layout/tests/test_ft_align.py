@@ -66,15 +66,48 @@ class Tags(unittest.TestCase):
         self.assertEqual(ft_align.first_tag({"port": 48089}, 9), 4)
         self.assertEqual(ft_align.first_tag({"port": 48189}, 9), 8)
 
+    def test_windows_monitors_have_their_own_tags(self):
+        self.assertEqual(ft_align.windows_first_tag("\\\\.\\DISPLAY1"), 0)
+        self.assertEqual(ft_align.windows_first_tag("\\\\.\\DISPLAY3"), 8)
+        with self.assertRaises(RuntimeError):
+            ft_align.windows_first_tag("nonsense")
+
+    def test_windows_tags_come_from_the_monitor_list(self):
+        monitors = [{"device_id": "{a}", "display_name": "\\\\.\\DISPLAY2"}, {"device_id": "{b}", "display_name": "\\\\.\\DISPLAY3"}]
+        self.assertEqual(ft_align.windows_tags([(104, {"app": "display:{a}", "id": "x"}), (105, {"app": "display:{b}", "id": "y"})], monitors), {104: 4, 105: 8})
+
+    def test_an_inactive_windows_monitor_says_so(self):
+        with self.assertRaisesRegex(RuntimeError, "isn't active"):
+            ft_align.windows_tags([(104, {"app": "display:{gone}", "label": "OMEN"})], [])
+
     def test_a_measured_size_is_used(self):
         d = {"size": [2560, 1440], "physical": {"width_m": 0.71, "height_m": 0.4}, "port": 48189}
-        e = ft_align.spec_entry(103, d, 0)
+        e = ft_align.spec_entry(103, d, 8)
         self.assertEqual((e["width_m"], e["height_m"], e["measure"], e["first_id"]), (0.71, 0.4, False, 8))
 
     def test_an_unmeasured_size_keeps_the_screens_shape(self):
         e = ft_align.spec_entry(101, {"size": [3024, 1964]}, 0)
         self.assertTrue(e["measure"])
         self.assertAlmostEqual(e["height_m"] / e["width_m"], 1964 / 3024)
+
+
+class Choices(unittest.TestCase):
+    def setUp(self):
+        self.layout = {"hosts": [{"name": "m", "address": "1", "displays": [{"id": "a", "app": "Desktop"}, {"id": "b", "app": "Desktop"}, {"id": "c", "app": "Desktop", "off": True}]}]}
+
+    def test_neighbours_can_join(self):
+        self.assertEqual([(c["a"], c["b"], c["joined"]) for c in ft_align.join_choices(self.layout)], [("a", "b", False)])
+
+    def test_a_join_can_be_set_and_cleared(self):
+        ft_align.set_join(self.layout, "a", "b", True)
+        self.assertTrue(ft_align.join_choices(self.layout)[0]["joined"])
+        ft_align.set_join(self.layout, "a", "b", False)
+        self.assertFalse(ft_align.join_choices(self.layout)[0]["joined"])
+
+    def test_a_display_joins_only_once(self):
+        ft_align.set_join(self.layout, "a", "b", True)
+        ft_align.set_join(self.layout, "b", "c", True)
+        self.assertEqual(self.layout["align_joins"], [["b", "c"]])
 
 
 if __name__ == "__main__":

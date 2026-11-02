@@ -284,6 +284,32 @@ function Main {
         }
     }
 
+    # The app the headset starts for monitor alignment. Vibepollo rewrites apps.json as it starts, so this edits
+    # the live file with Vibepollo stopped, and keeps the rest of it.
+    if ($Check) {
+        Say "Would add the app FrametopAlign, for monitor alignment, if it isn't there."
+    } else {
+        Copy-Item (Join-Path $PSScriptRoot "align-markers.ps1") (Join-Path $Data "align-markers.ps1") -Force
+        $appsFile = "$dir\config\apps.json"
+        $apps = Get-Content -Raw $appsFile | ConvertFrom-Json
+        if (-not ($apps.apps | Where-Object { $_.name -eq "FrametopAlign" })) {
+            Stop-Vibepollo
+            try {
+                # Vibepollo's own display and no display changes: the default turns the other monitors off.
+                $apps.apps = @($apps.apps) + [pscustomobject]@{
+                    "name" = "FrametopAlign"
+                    "cmd" = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Data "align-markers.ps1")`""
+                    "display-output" = ""
+                    "dd-configuration-option" = "disabled"
+                }
+                [IO.File]::WriteAllText($appsFile, ($apps | ConvertTo-Json -Depth 20))
+                Say "Added the app FrametopAlign, for monitor alignment."
+            } finally {
+                Start-Service $Service
+            }
+        }
+    }
+
     # 5. Checks
     $rules = @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |
         Where-Object { [Environment]::ExpandEnvironmentVariables($_.Program) -ieq $exe } |

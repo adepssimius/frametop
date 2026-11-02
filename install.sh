@@ -121,6 +121,7 @@ step "7/12 multi-screen desktop (ft-screens), its keyboard (Full Keyboard), Fram
 build "$root/screens/build.sh"
 build "$root/stream/build.sh"  # ft-stream: remote displays (Frametop Remote Displays)
 build "$root/keyboard/build.sh"  # Frametop's keyboard: Full Keyboard, by TaiKeid (keyboard/FRAMETOP.md)
+build "$root/align/build.sh"  # monitor alignment (docs/monitor-alignment.md): needs ft-camd's capabilities once
 "$root/desktops.sh" install >/dev/null
 "$root/input-settings/install.sh"
 "$root/display-settings/install.sh"

@@ -91,6 +91,45 @@ class Tags(unittest.TestCase):
         self.assertAlmostEqual(e["height_m"] / e["width_m"], 1964 / 3024)
 
 
+class Locking(unittest.TestCase):
+    good = {"shown_mm": 3, "spots": 40, "width_m": 0.71}
+
+    def test_locks_after_staying_good(self):
+        a = ft_align.AutoLock(False)
+        self.assertFalse(a.update(self.good, 10))
+        self.assertFalse(a.update(self.good, 12.9))
+        self.assertTrue(a.update(self.good, 13))
+
+    def test_a_dip_doesnt_count(self):
+        a = ft_align.AutoLock(False)
+        a.update(self.good, 10)
+        a.update(dict(self.good, shown_mm=9), 11)
+        self.assertFalse(a.update(self.good, 13.5))
+        self.assertTrue(a.update(self.good, 16.5))
+
+    def test_a_still_head_never_locks(self):
+        a = ft_align.AutoLock(False)
+        for t in range(20):
+            self.assertFalse(a.update(dict(self.good, spots=1), t))
+
+    def test_no_fit_never_locks(self):
+        a = ft_align.AutoLock(False)
+        for t in range(20):
+            self.assertFalse(a.update({}, t))
+
+    def test_measuring_waits_for_more_places(self):
+        a = ft_align.AutoLock(True)
+        for t in range(20):
+            self.assertFalse(a.update(dict(self.good, spots=20), t))
+
+    def test_measuring_waits_for_the_width_to_settle(self):
+        a = ft_align.AutoLock(True)
+        a.update(self.good, 10)
+        self.assertFalse(a.update(dict(self.good, width_m=0.70), 13))   # moved 10 mm: starts over
+        a.update(dict(self.good, width_m=0.70), 13.1)
+        self.assertTrue(a.update(dict(self.good, width_m=0.7005), 16.2))
+
+
 class Choices(unittest.TestCase):
     def setUp(self):
         self.layout = {"hosts": [{"name": "m", "address": "1", "displays": [{"id": "a", "app": "Desktop"}, {"id": "b", "app": "Desktop"}, {"id": "c", "app": "Desktop", "off": True}]}]}

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Align to My Monitors
+GenericName=Put the remote displays' panels on your physical monitors
+Comment=Each monitor shows markers while you move your head, and locks by itself. Open it again to stop.
+Exec=@REPO@/layout/ft-align-toggle
+Icon=view-fullscreen
+Categories=Settings;
+Keywords=display;monitor;align;calibrate;passthrough;remote;frametop;
+X-KDE-Shortcuts=Meta+Shift+A

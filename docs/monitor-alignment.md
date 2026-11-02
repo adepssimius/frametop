@@ -4,9 +4,11 @@ Puts each remote display's panel on top of the physical monitor it streams, so a
 
 ## Using it
 
-In Frametop Display Settings, on the Layout & profiles page, choose **Align to my monitors**. Each monitor shows markers and the panels move toward them as you move your head. Lock each display when it looks right, or when its figure turns green. Check **Join … into one curved monitor** first to make two neighbouring monitors one curved monitor.
+Open **Align to My Monitors** from the menu, or press Meta+Shift+A, or choose **Align to my monitors** on the Layout & profiles page of Frametop Display Settings. Each monitor shows markers and the panels move onto them as you move your head. Each one locks by itself once its figure has stayed under 5 mm for 3 seconds, and its stream comes back. Open the entry again to stop early. It stops by itself after 5 minutes. Check **Join … into one curved monitor** in Display Settings first to make two neighbouring monitors one curved monitor.
 
 `ft-layout align` does the same from a terminal, and `ft-layout align status | lock N|all | stop` control it.
+
+A display locks only after being seen from at least 12 places (a 5 cm grid), so a still head never locks. A monitor being measured for the first time needs 30 places and a steady width, because its size is kept for good.
 
 It needs ft-camd's capabilities once (`hands/run.sh caps`, which asks for the password), and each computer's host setup run with this version, which adds the marker app. Hand tracking doesn't have to be on.
 

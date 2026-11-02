@@ -97,7 +97,8 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
                                      unpin all|N
   ft-layout align [start]            put the remote displays' panels on the physical monitors they stream,
                                      from markers they show (docs/monitor-alignment.md); runs until they're
-                                     locked. Elsewhere: ft-layout align status | lock N|all | stop
+                                     good enough, when each locks by itself. Elsewhere: ft-layout align
+                                     status | lock N|all | stop. toggle: start it, or stop it if it's running
   ft-layout align join ID ID | unjoin  make two neighbouring displays one curved monitor after aligning
   ft-layout remote list              the remote displays, their numbers and their streams' state
   ft-layout remote monitors ADDRESS  the host's displays (Vibepollo's /api/display-devices, JSON)

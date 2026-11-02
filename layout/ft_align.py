@@ -33,6 +33,9 @@ MEASURED_BELOW_MM = 10       # a size is worth keeping when the fit is at least 
 MEASURED_FROM_SPOTS = 12     # ...from this many places (a still head can't tell size from distance)
 READY_BELOW_MM = 5           # the figure that says "good"
 TIME_LIMIT_S = 300
+HOLD_S = 3                   # a display locks itself after staying good this long
+MEASURING_SPOTS = 30         # a first run also needs this many places before it locks: the size settles last
+WIDTH_STEADY_M = 0.002       # ...and its width has to stay within this over the hold
 LIVE_WAIT_S = 30
 
 
@@ -114,7 +117,7 @@ def hint(fit):
     if "shown_mm" not in fit:
         return "Look toward this display"
     if fit["shown_mm"] < READY_BELOW_MM:
-        return "Good: lock it when it looks right"
+        return "Good: it locks by itself in a moment"
     x, y, _ = fit.get("range_mm", [0, 0, 0])
     if fit.get("distance_m", 0) > 0.95:
         return "Lean closer"
@@ -123,6 +126,29 @@ def hint(fit):
     if x < 200:
         return "Move side to side"
     return "Keep moving slowly"
+
+
+class AutoLock:
+    """Says when a display has been good for long enough. The figure can dip for a moment as frames arrive, so it
+    has to stay down; a monitor being measured also needs its size to have settled, since that's kept for good."""
+
+    def __init__(self, measuring):
+        self.measuring = measuring
+        self.since = None
+        self.width = None
+
+    def update(self, fit, now):
+        good = fit.get("shown_mm", 1e9) < READY_BELOW_MM and fit.get("spots", 0) >= MEASURED_FROM_SPOTS
+        if self.measuring:
+            good = good and fit.get("spots", 0) >= MEASURING_SPOTS
+            if good and self.width is not None and abs(fit.get("width_m", 0) - self.width) > WIDTH_STEADY_M:
+                good = False
+        if not good:
+            self.since = self.width = None
+            return False
+        if self.since is None:
+            self.since, self.width = now, fit.get("width_m")
+        return now - self.since >= HOLD_S
 
 
 class Session:
@@ -225,7 +251,13 @@ class Session:
         threading.Thread(target=self.read_fits, daemon=True).start()
         with self.mu:
             self.state = "aligning"
-        self.finish.wait(TIME_LIMIT_S)
+        locks = {n: AutoLock(not d.get("physical")) for n, d in self.displays}
+        end = time.time() + TIME_LIMIT_S
+        while time.time() < end and not self.finish.wait(0.25):
+            with self.mu:
+                ready = [n for n, fit in self.fits.items() if n not in self.locked and locks[n].update(fit, time.time())]
+            for number in ready:
+                self.lock(number)
 
     def lock(self, number):
         """Freezes a display where it is, and gives it its stream back."""
@@ -444,10 +476,16 @@ def start(host_name=None):
 
 
 def command(args):
-    """ft-layout align [start [--host NAME]] | status | lock N|all | stop | join ID ID | unjoin"""
+    """ft-layout align [start [--host NAME]] | toggle | status | lock N|all | stop | join ID ID | unjoin"""
     what = args[0] if args else "start"
     if what == "start":
         return start(args[args.index("--host") + 1] if "--host" in args else None)
+    if what == "toggle":     # for a menu entry or a mapped button: the one control there is in the headset
+        try:
+            ask("stop")
+        except RuntimeError:
+            return start()
+        return 0
     if what == "status":
         print(json.dumps(ask("status"), indent=1))
     elif what == "lock" and len(args) == 2:

@@ -171,6 +171,14 @@ class Backend(QObject):
             self._notify_state = notify_state
             self.changed.emit()
         self._check_powerd()
+        # An alignment started elsewhere (a terminal, a mapped button) gets its card too.
+        if not getattr(self, "_align", None):
+            try:
+                self._align = ft_align.ask("status")
+            except RuntimeError:
+                pass
+            else:
+                self._watch_align()
 
     def _read_pins(self, count):
         pins = []
@@ -782,6 +790,9 @@ class Backend(QObject):
         if not QProcess.startDetached(argv[0], argv[1:]):
             return self.message.emit("Couldn't start alignment", True)
         self._align = {"state": "starting", "displays": []}
+        self._watch_align()
+
+    def _watch_align(self):
         self._align_since = time.time()
         self.alignChanged.emit()
         if not hasattr(self, "_align_poll"):

@@ -73,7 +73,7 @@ static std::map<int, TagCorners> see(const Camera &cam, const double head[12], c
 }
 
 static double worst_corner_mm(const Display &d, const Rigid &a, const Rigid &b) {
-    const double hw = d.width * d.pitch / 2, hh = d.height * d.pitch / 2;
+    const double hw = d.width_m / 2, hh = d.height_m / 2;
     double worst = 0;
     for (V3 m : {V3{-hw, -hh, 0}, V3{hw, -hh, 0}, V3{hw, hh, 0}, V3{-hw, hh, 0}})
         worst = std::max(worst, norm(room_from_screen(a, m) - room_from_screen(b, m)) * 1000);
@@ -82,7 +82,7 @@ static double worst_corner_mm(const Display &d, const Rigid &a, const Rigid &b) 
 
 int main() {
     const Camera cam = test_camera();
-    const Display d = make_display(103, 0, 2560, 1440, 0.2784e-3);
+    const Display d = make_display(103, 0, 0.7127, 0.4009);
     const Rigid truth = true_pose();
 
     CHECK(d.tags.size() == 4, "a display has four tags");
@@ -136,7 +136,7 @@ int main() {
         CHECK(a.shown_mm > b.shown_mm * 1.5, "still %.2f mm vs moving %.2f mm", a.shown_mm, b.shown_mm);
     }
     {   // Another display's tags are ignored, so several solvers can share every frame.
-        const Display other = make_display(102, 4, 2560, 1440, 0.2784e-3);
+        const Display other = make_display(102, 4, 0.7127, 0.4009);
         Solver s(other);
         double head[12];
         look_at(V3{0, 1.5, 0}, truth.t, head);
@@ -165,6 +165,20 @@ int main() {
         fitter.join();
         CHECK(fits > 0, "fits while frames arrive");
         CHECK(worst_corner_mm(d, last.pose, truth) < 6, "fit while frames arrive: %.2f mm off", worst_corner_mm(d, last.pose, truth));
+    }
+    {   // Told a wrong size, with head movement, it measures the real one. The tags are where the true size puts them.
+        std::mt19937 rng(13);
+        const Display guess = make_display(103, 0, 0.60, 0.60 * 0.4009 / 0.7127, false);
+        Solver s(guess);
+        for (int i = 0; i < 60; ++i) {
+            double head[12];
+            look_at(V3{0.1 + 0.35 * std::sin(i * 0.3), 1.5 + 0.25 * std::cos(i * 0.3), -0.3 + 0.2 * std::sin(i * 0.11)}, truth.t, head);
+            s.add(cam, head, see(cam, head, d, truth, &rng, 0.5));
+        }
+        Fit fit;
+        CHECK(s.solve(fit), "fits with a guessed size");
+        CHECK(std::fabs(fit.width_m - 0.7127) < 0.02, "measured the width as %.4f m, not 0.7127", fit.width_m);
+        CHECK(std::fabs(fit.height_m - 0.4009) < 0.012, "measured the height as %.4f m, not 0.4009", fit.height_m);
     }
     {   // Join: tangent and touching at the seam, with the width kept as the arc.
         double l[12], r[12];

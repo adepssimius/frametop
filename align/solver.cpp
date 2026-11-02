@@ -13,6 +13,7 @@ constexpr double kFocalPx = 318;   // about the side cameras' focal length: resi
 // Frames from one spot share their errors, so they count as one view, not as evidence that adds up. Below
 // this many spots (a 5 cm grid) the figure grows. A replayed still pass had a figure of 5.8 mm at a real 14 mm.
 constexpr int kEnoughSpots = 12;
+constexpr double kSizeGuessSpread = 0.3;   // how far a guessed size may be off (of its value), one sigma
 
 V3 cross(V3 a, V3 b) { return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]}; }
 
@@ -50,10 +51,10 @@ V3 rotate(const double R[3][3], V3 p) {
             R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2]};
 }
 
-// Solves A x = b for a symmetric positive definite A. False if it isn't.
-template <int N> bool cholesky_solve(const double A[N][N], const double b[N], double x[N]) {
-    double L[N][N] = {};
-    for (int i = 0; i < N; ++i)
+// Solves A x = b for a symmetric positive definite n x n A (n up to 7). False if it isn't.
+bool cholesky_solve(int n, const double A[7][7], const double b[7], double x[7]) {
+    double L[7][7] = {};
+    for (int i = 0; i < n; ++i)
         for (int j = 0; j <= i; ++j) {
             double s = A[i][j];
             for (int k = 0; k < j; ++k) s -= L[i][k] * L[j][k];
@@ -64,15 +65,15 @@ template <int N> bool cholesky_solve(const double A[N][N], const double b[N], do
                 L[i][j] = s / L[j][j];
             }
         }
-    double y[N];
-    for (int i = 0; i < N; ++i) {
+    double y[7];
+    for (int i = 0; i < n; ++i) {
         y[i] = b[i];
         for (int k = 0; k < i; ++k) y[i] -= L[i][k] * y[k];
         y[i] /= L[i][i];
     }
-    for (int i = N - 1; i >= 0; --i) {
+    for (int i = n - 1; i >= 0; --i) {
         x[i] = y[i];
-        for (int k = i + 1; k < N; ++k) x[i] -= L[k][i] * x[k];
+        for (int k = i + 1; k < n; ++k) x[i] -= L[k][i] * x[k];
         x[i] /= L[i][i];
     }
     return true;
@@ -115,17 +116,16 @@ void smallest_eigenvector(double A[9][9], double out[9]) {
 
 }  // namespace
 
-Display make_display(int panel, int first_id, int width, int height, double pitch, int tag, int margin) {
+Display make_display(int panel, int first_id, double width_m, double height_m, bool size_known, double tag, double margin) {
     Display d;
-    d.panel = panel, d.first_id = first_id, d.width = width, d.height = height, d.pitch = pitch;
-    if (!tag) tag = int(std::lround(height * 0.43));
-    if (!margin) margin = int(std::lround(height * 0.056));
-    const int xs[4] = {margin, width - margin - tag, margin, width - margin - tag};
-    const int ys[4] = {margin, margin, height - margin - tag, height - margin - tag};
-    for (int i = 0; i < 4; ++i) {
-        const double x0 = (xs[i] - width / 2.0) * pitch, y0 = (ys[i] - height / 2.0) * pitch, s = tag * pitch;
-        d.tags[first_id + i] = {V3{x0, y0, 0}, V3{x0 + s, y0, 0}, V3{x0 + s, y0 + s, 0}, V3{x0, y0 + s, 0}};
-    }
+    d.panel = panel, d.first_id = first_id, d.width_m = width_m, d.height_m = height_m, d.size_known = size_known;
+    const double side = tag * height_m, edge = margin * height_m;
+    const double right = width_m / 2 - edge - side, bottom = height_m / 2 - edge - side;
+    const double xs[4] = {-width_m / 2 + edge, right, -width_m / 2 + edge, right};
+    const double ys[4] = {-height_m / 2 + edge, -height_m / 2 + edge, bottom, bottom};
+    for (int i = 0; i < 4; ++i)
+        d.tags[first_id + i] = {V3{xs[i], ys[i], 0}, V3{xs[i] + side, ys[i], 0}, V3{xs[i] + side, ys[i] + side, 0},
+                                V3{xs[i], ys[i] + side, 0}};
     return d;
 }
 
@@ -159,7 +159,7 @@ void Solver::add(const Camera &cam, const double head[12], const std::map<int, T
     obs_.push_back(std::move(o));
 }
 
-bool Solver::seed(const std::vector<const Obs *> &frames, double q[6]) const {
+bool Solver::seed(const std::vector<const Obs *> &frames, double q[7]) const {
     // The frame showing the most corners, as a plane-to-ray homography: H = [r1 r2 (t - origin)] up to scale.
     const Obs *best = frames[0];
     for (const Obs *f : frames)
@@ -189,7 +189,7 @@ bool Solver::seed(const std::vector<const Obs *> &frames, double q[6]) const {
     const double R[3][3] = {{r1[0], r2[0], r3[0]}, {r1[1], r2[1], r3[1]}, {r1[2], r2[2], r3[2]}};
     matrix_to_rotvec(R, q);
     const V3 t = h3 * scale + best->origin;
-    q[3] = t[0], q[4] = t[1], q[5] = t[2];
+    q[3] = t[0], q[4] = t[1], q[5] = t[2], q[6] = 1;
     return std::isfinite(q[0]) && std::isfinite(q[3]);
 }
 
@@ -208,17 +208,21 @@ bool Solver::solve(Fit &out, int max_frames) {
     size_t n = 0;
     for (const Obs *f : frames) n += f->rays.size();
 
-    const auto residuals = [&](const double q[6], std::vector<double> &r) {
+    // The size given, or a seventh parameter for it, held near the guess so a still head can't run away with it.
+    const int np = display_.size_known ? 6 : 7;
+    const auto residuals = [&](const double q[7], std::vector<double> &r) {
         double R[3][3];
         rotvec_to_matrix(q, R);
         const V3 t{q[3], q[4], q[5]};
-        r.resize(n * 3);
+        const double scale = np == 7 ? q[6] : 1;
+        r.resize(n * 3 + (np == 7 ? 1 : 0));
         size_t at = 0;
         for (const Obs *f : frames)
             for (size_t i = 0; i < f->rays.size(); ++i) {
-                const V3 c = cross(unit(rotate(R, f->model[i]) + t - f->origin), f->rays[i]);
+                const V3 c = cross(unit(rotate(R, f->model[i] * scale) + t - f->origin), f->rays[i]);
                 r[at++] = c[0] * kFocalPx, r[at++] = c[1] * kFocalPx, r[at++] = c[2] * kFocalPx;
             }
+        if (np == 7) r[at] = (scale - 1) / kSizeGuessSpread;
     };
     const auto cost = [](const std::vector<double> &r) {   // soft L1: a bad corner can't drag the fit far
         double c = 0;
@@ -226,21 +230,21 @@ bool Solver::solve(Fit &out, int max_frames) {
         return c;
     };
 
-    double q[6];
+    double q[7];
     if (have_q_) {
-        std::copy(q_, q_ + 6, q);
+        std::copy(q_, q_ + 7, q);
     } else if (!seed(frames, q)) {
         return false;
     }
     std::vector<double> r, rd, trial;
-    std::vector<std::array<double, 6>> J(n * 3);
+    std::vector<std::array<double, 7>> J(n * 3 + (np == 7 ? 1 : 0));
     residuals(q, r);
     double c = cost(r), lambda = 1e-3;
-    double JtJ[6][6];
+    double JtJ[7][7];
     const auto jacobian = [&]() {
-        for (int a = 0; a < 6; ++a) {
-            double qd[6];
-            std::copy(q, q + 6, qd);
+        for (int a = 0; a < np; ++a) {
+            double qd[7];
+            std::copy(q, q + 7, qd);
             const double step = 1e-6;
             qd[a] += step;
             residuals(qd, rd);
@@ -249,28 +253,29 @@ bool Solver::solve(Fit &out, int max_frames) {
     };
     for (int iter = 0; iter < 25; ++iter) {
         jacobian();
-        double g[6] = {};
-        for (auto &row : JtJ) std::fill(row, row + 6, 0.0);
+        double g[7] = {};
+        for (auto &row : JtJ) std::fill(row, row + 7, 0.0);
         for (size_t i = 0; i < r.size(); ++i) {
             const double w = 1 / std::sqrt(1 + r[i] * r[i]);
-            for (int a = 0; a < 6; ++a) {
+            for (int a = 0; a < np; ++a) {
                 g[a] -= w * J[i][a] * r[i];
-                for (int b = 0; b < 6; ++b) JtJ[a][b] += w * J[i][a] * J[i][b];
+                for (int b = 0; b < np; ++b) JtJ[a][b] += w * J[i][a] * J[i][b];
             }
         }
         bool improved = false;
         for (int tries = 0; tries < 8 && !improved; ++tries) {
-            double A[6][6], dq[6];
-            std::copy(&JtJ[0][0], &JtJ[0][0] + 36, &A[0][0]);
-            for (int a = 0; a < 6; ++a) A[a][a] *= 1 + lambda;
-            if (cholesky_solve<6>(A, g, dq)) {
-                double qn[6];
-                for (int a = 0; a < 6; ++a) qn[a] = q[a] + dq[a];
+            double A[7][7], dq[7];
+            std::copy(&JtJ[0][0], &JtJ[0][0] + 49, &A[0][0]);
+            for (int a = 0; a < np; ++a) A[a][a] *= 1 + lambda;
+            if (cholesky_solve(np, A, g, dq)) {
+                double qn[7];
+                std::copy(q, q + 7, qn);
+                for (int a = 0; a < np; ++a) qn[a] = q[a] + dq[a];
                 residuals(qn, trial);
                 const double cn = cost(trial);
                 if (cn < c) {
                     const double drop = c - cn;
-                    std::copy(qn, qn + 6, q);
+                    std::copy(qn, qn + 7, q);
                     r = trial, c = cn, lambda = std::max(lambda / 3, 1e-9), improved = true;
                     if (drop < 1e-6 * c) iter = 25;
                     continue;
@@ -281,11 +286,11 @@ bool Solver::solve(Fit &out, int max_frames) {
         if (!improved) break;
     }
     jacobian();
-    for (auto &row : JtJ) std::fill(row, row + 6, 0.0);
+    for (auto &row : JtJ) std::fill(row, row + 7, 0.0);
     for (size_t i = 0; i < r.size(); ++i) {
         const double w = 1 / std::sqrt(1 + r[i] * r[i]);
-        for (int a = 0; a < 6; ++a)
-            for (int b = 0; b < 6; ++b) JtJ[a][b] += w * J[i][a] * J[i][b];
+        for (int a = 0; a < np; ++a)
+            for (int b = 0; b < np; ++b) JtJ[a][b] += w * J[i][a] * J[i][b];
     }
 
     // The residuals' size, without outliers.
@@ -300,14 +305,15 @@ bool Solver::solve(Fit &out, int max_frames) {
     const double sigma2 = kept ? sum / kept : 1;
 
     // Each column of the covariance, then how far it could move each screen corner.
-    double cov[6][6];
-    for (int a = 0; a < 6; ++a) {
-        double e[6] = {}, col[6];
+    double cov[7][7];
+    for (int a = 0; a < np; ++a) {
+        double e[7] = {}, col[7];
         e[a] = 1;
-        if (!cholesky_solve<6>(JtJ, e, col)) return false;
-        for (int b = 0; b < 6; ++b) cov[b][a] = col[b] * sigma2;
+        if (!cholesky_solve(np, JtJ, e, col)) return false;
+        for (int b = 0; b < np; ++b) cov[b][a] = col[b] * sigma2;
     }
-    const double hw = display_.width * display_.pitch / 2, hh = display_.height * display_.pitch / 2;
+    const double scale = np == 7 ? q[6] : 1;
+    const double hw = display_.width_m / 2, hh = display_.height_m / 2;
     const V3 model[4] = {V3{-hw, -hh, 0}, V3{hw, -hh, 0}, V3{hw, hh, 0}, V3{-hw, hh, 0}};
     Rigid pose;
     rotvec_to_matrix(q, pose.R);
@@ -315,29 +321,31 @@ bool Solver::solve(Fit &out, int max_frames) {
     V3 corners[4];
     double spread = 0, change = 0;
     for (int k = 0; k < 4; ++k) {
-        corners[k] = rotate(pose.R, model[k]) + pose.t;
-        double Jc[3][6];
-        for (int a = 0; a < 6; ++a) {
-            double qd[6], Rd[3][3];
-            std::copy(q, q + 6, qd);
+        corners[k] = rotate(pose.R, model[k] * scale) + pose.t;
+        double Jc[3][7];
+        for (int a = 0; a < np; ++a) {
+            double qd[7], Rd[3][3];
+            std::copy(q, q + 7, qd);
             qd[a] += 1e-6;
             rotvec_to_matrix(qd, Rd);
-            const V3 moved = rotate(Rd, model[k]) + V3{qd[3], qd[4], qd[5]};
+            const V3 moved = rotate(Rd, model[k] * (np == 7 ? qd[6] : 1)) + V3{qd[3], qd[4], qd[5]};
             for (int i = 0; i < 3; ++i) Jc[i][a] = (moved[i] - corners[k][i]) / 1e-6;
         }
         double var = 0;
         for (int i = 0; i < 3; ++i)
-            for (int a = 0; a < 6; ++a)
-                for (int b = 0; b < 6; ++b) var += Jc[i][a] * cov[a][b] * Jc[i][b];
+            for (int a = 0; a < np; ++a)
+                for (int b = 0; b < np; ++b) var += Jc[i][a] * cov[a][b] * Jc[i][b];
         spread = std::max(spread, std::sqrt(std::max(var, 0.0)));
         if (have_corners_) change = std::max(change, norm(corners[k] - corners_[k]));
     }
     std::copy(corners, corners + 4, corners_);
     have_corners_ = true;
-    std::copy(q, q + 6, q_);
+    std::copy(q, q + 7, q_);
     have_q_ = true;
 
     out.pose = pose;
+    out.width_m = display_.width_m * scale;
+    out.height_m = display_.height_m * scale;
     std::set<std::array<int, 3>> spots;
     for (const Obs *f : frames)
         spots.insert({int(std::floor(f->head[0] / 0.05)), int(std::floor(f->head[1] / 0.05)), int(std::floor(f->head[2] / 0.05))});

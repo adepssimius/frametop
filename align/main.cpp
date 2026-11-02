@@ -4,8 +4,9 @@
 //   ft-align run SPEC.json            live: JSON status lines on stdout; "lock N" and "quit" on stdin
 //   ft-align replay DIR SPEC.json     a capture (index.json, its PGM frames, poses.csv): prints each fit
 //
-// SPEC.json: {"displays": [{"panel": 103, "first_id": 0, "width": 2560, "height": 1440, "pitch": 0.0002784}]},
-// with optional "tag" and "margin" in pixels. docs/monitor-alignment.md has the rest.
+// SPEC.json: {"displays": [{"panel": 103, "first_id": 0, "width_m": 0.7127, "height_m": 0.4009}]}. With "measure":
+// true those are a guess and the fit finds the real size. "tag" and "margin" override the marker layout, as
+// fractions of the height. docs/monitor-alignment.md has the rest.
 #include "../hands/camd/fhring.h"
 #include "solver.h"
 
@@ -55,8 +56,9 @@ bool load_spec(const std::string &path, std::vector<Display> &out, std::string &
         return false;
     }
     for (const auto &d : v["displays"])
-        out.push_back(make_display(d["panel"].asInt(), d["first_id"].asInt(), d["width"].asInt(), d["height"].asInt(),
-                                   d["pitch"].asDouble(), d.get("tag", 0).asInt(), d.get("margin", 0).asInt()));
+        out.push_back(make_display(d["panel"].asInt(), d["first_id"].asInt(), d["width_m"].asDouble(), d["height_m"].asDouble(),
+                                   !d.get("measure", false).asBool(), d.get("tag", kTagFraction).asDouble(),
+                                   d.get("margin", kMarginFraction).asDouble()));
     if (out.empty()) err = path + " lists no displays";
     return !out.empty();
 }
@@ -180,6 +182,9 @@ std::string status_json(const Live &l, double seconds) {
       << ",\"sightings\":" << l.solver.sightings();
     if (l.have_fit) {
         const Fit &f = l.fit;
+        s.precision(4);
+        s << ",\"width_m\":" << f.width_m << ",\"height_m\":" << f.height_m;
+        s.precision(2);
         s << ",\"shown_mm\":" << f.shown_mm << ",\"change_mm\":" << f.change_mm << ",\"rms_px\":" << f.rms_px
           << ",\"frames\":" << f.frames << ",\"spots\":" << f.spots << ",\"solve_ms\":" << f.solve_ms << ",\"distance_m\":" << f.distance_m << ",\"range_mm\":[" << f.head_range_mm[0]
           << "," << f.head_range_mm[1] << "," << f.head_range_mm[2] << "]";
@@ -282,6 +287,7 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
             Screens screens;
             int seen = 0;
             bool sized = false;
+            double last_width = 0;
             while (!stop && !l.locked) {
                 const uint64_t began = now_ns();
                 const int sightings = l.solver.sightings();
@@ -301,12 +307,13 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
                     if (fit.shown_mm < kPlaceBelowMm) {
                         if (!sized) {
                             char c[80];
-                            std::snprintf(c, sizeof c, "width %d %.4f", l.display.panel, l.display.metres());
-                            screens.ask(c);
                             std::snprintf(c, sizeof c, "curve %d 0", l.display.panel);
                             screens.ask(c);
                             sized = true;
                         }
+                        char width[80];
+                        std::snprintf(width, sizeof width, "width %d %.4f", l.display.panel, fit.width_m);
+                        if (std::fabs(fit.width_m - last_width) > 0.0005) screens.ask(width), last_width = fit.width_m;
                         double m[12];
                         panel_matrix(fit.pose, m);
                         std::ostringstream cmd;

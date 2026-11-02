@@ -15,19 +15,19 @@
 using TagCorners = std::array<V2, 4>;    // top left, top right, bottom right, bottom left, as drawn
 
 // A display: its panel in ft-screens, the tags it shows, and its size. Model coordinates are metres
-// from the screen's centre: +x right, +y down, z 0.
+// from the screen's centre at the size given: +x right, +y down, z 0. Tags are placed as fractions of the
+// screen, so its resolution and scaling don't matter. tag and margin are fractions of its height.
 struct Display {
     int panel = 0;
     int first_id = 0;
-    int width = 0, height = 0;   // pixels
-    double pitch = 0;            // metres per pixel
+    double width_m = 0, height_m = 0;
+    bool size_known = true;      // false: width_m is a guess, and the fit measures the real size
     std::map<int, std::array<V3, 4>> tags;
-
-    double metres() const { return width * pitch; }
 };
 
-// The tag layout: a square tag in each corner. tag and margin in pixels; 0 picks them from the height.
-Display make_display(int panel, int first_id, int width, int height, double pitch, int tag = 0, int margin = 0);
+constexpr double kTagFraction = 0.43, kMarginFraction = 0.056;
+Display make_display(int panel, int first_id, double width_m, double height_m, bool size_known = true,
+                     double tag = kTagFraction, double margin = kMarginFraction);
 
 struct Rigid {
     double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};   // screen axes (columns) in the room
@@ -39,6 +39,7 @@ void panel_matrix(const Rigid &r, double m[12]);
 
 struct Fit {
     Rigid pose;
+    double width_m = 0, height_m = 0;   // the screen's size: as given, or as measured
     double spread_mm = 0;    // how far the worst screen corner could be off, from the fit alone
     double shown_mm = 0;     // the figure to show: spread_mm scaled by real captures, more if the head hardly moved
     double change_mm = 0;    // how far the worst corner moved since the last fit
@@ -72,13 +73,13 @@ private:
     Display display_;
     std::mutex mu_;           // guards obs_ while add() grows it; a deque keeps what solve() is reading in place
     std::deque<Obs> obs_;
-    double q_[6] = {};
+    double q_[7] = {0, 0, 0, 0, 0, 0, 1};   // rotation vector, centre, and scale of the size given
     bool have_q_ = false;
     bool have_corners_ = false;
     V3 corners_[4];
     std::atomic<int> sightings_{0};
 
-    bool seed(const std::vector<const Obs *> &frames, double q[6]) const;
+    bool seed(const std::vector<const Obs *> &frames, double q[7]) const;
 };
 
 // The joined curved monitor: two equal panels as arcs of one cylinder, tangent at the seam. radius 0

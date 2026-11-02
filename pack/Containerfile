@@ -17,6 +17,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
       libdrm-devel mesa-libgbm-devel wayland-devel vulkan-loader-devel \
       vulkan-headers plasma-wayland-protocols wlroots-devel pixman-devel \
       libstdc++-static glibc-static jsoncpp-devel zstd \
+      # monitor alignment (align/): finding the tags the monitors show
+      apriltag-devel \
       # remote displays (stream/): moonlight-embedded's libgamestream and
       # moonlight-common-c, and the host's sound (Opus, PulseAudio)
       openssl-devel libcurl-devel expat-devel libuuid-devel json-devel \

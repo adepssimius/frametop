@@ -47,6 +47,9 @@ test-c:
     g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Werror screens/tests/handview_test.cpp \
       screens/handmesh.cpp screens/handskin.cpp screens/handrobot.cpp screens/handcut.cpp -o build/tests/handview-test
     build/tests/handview-test >/dev/null && echo "screens/tests/handview_test.cpp: ok"
+    g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-psabi -Werror align/tests/solver_test.cpp align/solver.cpp \
+      hands/track/calib.cpp -ljsoncpp -lpthread -o build/tests/align-solver-test
+    build/tests/align-solver-test && echo "align/tests/solver_test.cpp: ok"
     python3 -I screens/tools/hand-asset.py --check
     for t in pointer/tests/*-test.cpp; do
         n=$(basename "$t" .cpp)

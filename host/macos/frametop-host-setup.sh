@@ -93,6 +93,21 @@ stop_agents() {
     done
 }
 
+# The app the headset starts for monitor alignment, in instance N's apps.json. It keeps the rest of the file.
+add_align_app() {
+    osascript -l JavaScript - "$DATA/instance-$1/apps.json" "$DATA/bin/ft-align-markers" "$1" >/dev/null <<'JS'
+ObjC.import('Foundation');
+function run(argv) {
+  const [path, tool, n] = argv;
+  const read = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
+  const apps = JSON.parse(ObjC.unwrap(read));
+  apps.apps = apps.apps.filter(a => a.name !== 'FrametopAlign');
+  apps.apps.push({ name: 'FrametopAlign', 'image-path': 'desktop.png', cmd: `"${tool}" ${n}` });
+  $(JSON.stringify(apps, null, 2)).writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
+}
+JS
+}
+
 # Frametop Streams: a menu bar icon that turns each instance on or off through ft-sunshine,
 # started at login. It's a stay-open AppleScript app, so nothing needs compiling. LSUIElement
 # keeps it out of the Dock, and changing Info.plist means signing it again (ad hoc, as osacompile
@@ -341,7 +356,7 @@ $n"
     else
         stop_agents
         mkdir -p "$DATA/bin" "$DATA/credentials" "$AGENTS"
-        cp "$HERE/ft-sunshine-instance" "$HERE/ft-sunshine" "$HERE/displays.js" "$DATA/bin/"
+        cp "$HERE/ft-sunshine-instance" "$HERE/ft-sunshine" "$HERE/displays.js" "$HERE/ft-align-markers" "$HERE/align-markers.js" "$DATA/bin/"
         chmod 755 "$DATA/bin/ft-sunshine-instance" "$DATA/bin/ft-sunshine"
         install_streams_app
         # One certificate for every instance, so Frametop pins one key for the Mac.
@@ -357,6 +372,7 @@ $n"
             write_conf "$DATA/instance-$n/sunshine.conf" "$n" "$name" "$w" "$h"
             [ -e "$DATA/instance-$n/apps.json" ] ||
                 printf '{\n  "env": {},\n  "apps": [{"name": "Desktop", "image-path": "desktop.png"}]\n}\n' > "$DATA/instance-$n/apps.json"
+            add_align_app "$n"
             write_agent "$n"
             say "Instance $n: $name ($w x $h), port $((BASE_PORT + 100 * n))."
         done <<< "$lines"

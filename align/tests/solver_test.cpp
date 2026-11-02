@@ -180,42 +180,6 @@ int main() {
         CHECK(std::fabs(fit.width_m - 0.7127) < 0.02, "measured the width as %.4f m, not 0.7127", fit.width_m);
         CHECK(std::fabs(fit.height_m - 0.4009) < 0.012, "measured the height as %.4f m, not 0.4009", fit.height_m);
     }
-    {   // Join: tangent and touching at the seam, with the width kept as the arc.
-        double l[12], r[12];
-        Rigid pl, pr;
-        const double ang = 19 * M_PI / 180 / 2, w = 0.7127;
-        for (Rigid *p : {&pl, &pr}) {
-            const double s = p == &pl ? 1 : -1;
-            p->R[0][0] = std::cos(ang), p->R[0][2] = -s * std::sin(ang);
-            p->R[1][1] = -1;
-            p->R[2][0] = -s * std::sin(ang), p->R[2][2] = -std::cos(ang);
-            // room z of the screen's x is -s sin, and its into-screen axis is mostly -z
-        }
-        pl.t = {-0.37, 1.5, -1.05}, pr.t = {0.37, 1.5, -1.05};
-        panel_matrix(pl, l);
-        panel_matrix(pr, r);
-        Join j;
-        CHECK(join_panels(l, r, w, 0, j), "joins two panels turned toward each other");
-        const auto edge = [&](const double m[12], double side, V3 *tan) {
-            const double a = side * w / (2 * j.radius);
-            V3 p{}, tv{};
-            for (int i = 0; i < 3; ++i) {
-                p[i] = m[i * 4 + 3] + m[i * 4] * j.radius * std::sin(a) + m[i * 4 + 2] * j.radius * (1 - std::cos(a));
-                tv[i] = m[i * 4] * std::cos(a) + m[i * 4 + 2] * std::sin(a);
-            }
-            *tan = tv;
-            return p;
-        };
-        V3 tl, tr;
-        const V3 el = edge(j.left, 1, &tl), er = edge(j.right, -1, &tr);
-        CHECK(norm(el - er) < 1e-4, "the seam closes: %.5f m", norm(el - er));
-        CHECK(dot(tl, tr) > 0.9999, "tangent at the seam: %.5f", dot(tl, tr));
-        CHECK(std::fabs(j.turn_deg - 19) < 0.5, "keeps the panels' turn: %.2f degrees", j.turn_deg);
-        CHECK(std::fabs(j.radius - w / (19 * M_PI / 180)) < 0.05, "radius %.3f", j.radius);
-        Join stronger;
-        CHECK(join_panels(l, r, w, 1.2, stronger) && std::fabs(stronger.radius - 1.2) < 1e-9, "takes a chosen radius");
-        CHECK(!join_panels(r, l, w, 0, j), "refuses panels the wrong way round");
-    }
     if (failures) {
         std::printf("%d failed\n", failures);
         return 1;

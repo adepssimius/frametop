@@ -81,11 +81,3 @@ private:
 
     bool seed(const std::vector<const Obs *> &frames, double q[7]) const;
 };
-
-// The joined curved monitor: two equal panels as arcs of one cylinder, tangent at the seam. radius 0
-// keeps the turn the two panels already have between them. Each panel's pose and the radius come back.
-struct Join {
-    double left[12], right[12];
-    double radius = 0, turn_deg = 0, sag_mm = 0;
-};
-bool join_panels(const double left[12], const double right[12], double width, double radius, Join &out);

@@ -1,0 +1,10 @@
+#!/bin/bash
+# Frametop's monitor alignment: shows instance N's markers on its display. Sunshine runs this as the app
+# FrametopAlign, on the headset's request. Each instance has its own four tags: 4N to 4N+3.
+# Usage: ft-align-markers N
+set -u
+n=${1:?usage: ft-align-markers N}
+here=$(cd "$(dirname "$0")" && pwd)
+key=$(cut -f1 "$here/../instance-$n/display" 2>/dev/null)
+[ -n "$key" ] || { echo "instance $n has no display; run frametop-host-setup.sh again" >&2; exit 1; }
+exec osascript -l JavaScript "$here/align-markers.js" "$key" "$((n * 4))"

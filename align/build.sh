@@ -8,6 +8,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 exec "$root/scripts/frame.sh" -C align 'set -e; mkdir -p build/include
 . ../scripts/openvr.sh
 cxx="g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-psabi"
+make -s -C ../hands build/ft-camd
 $cxx -o build/solver-test tests/solver_test.cpp solver.cpp ../hands/track/calib.cpp -ljsoncpp -lpthread
 build/solver-test
 echo "align/tests/solver_test.cpp: ok"

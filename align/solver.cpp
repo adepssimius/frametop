@@ -370,39 +370,3 @@ bool Solver::solve(Fit &out, int max_frames) {
     out.distance_m = dist / frames.size();
     return true;
 }
-
-bool join_panels(const double left[12], const double right[12], double width, double radius, Join &out) {
-    const auto col = [](const double m[12], int c) { return V3{m[c], m[4 + c], m[8 + c]}; };
-    const V3 lx = col(left, 0), ly = col(left, 1), lz = col(left, 2), lp = col(left, 3);
-    const V3 rx = col(right, 0), ry = col(right, 1), rz = col(right, 2), rp = col(right, 3);
-    const V3 up = unit(ly + ry);
-    const auto flat = [&](V3 v) { return unit(v - up * dot(v, up)); };
-    const V3 nl = flat(lz), nr = flat(rz);
-    const double measured = std::acos(std::clamp(dot(nl, nr), -1.0, 1.0));
-    if (radius <= 0) {
-        if (measured < 1e-3) return false;   // parallel panels have no turn to keep
-        radius = width / measured;
-    }
-    const double phi = width / radius;
-    const V3 n = unit(nl + nr);
-    const V3 t = cross(up, n);
-    if (dot(t, rp - lp) <= 0) return false;  // the wrong way round, or facing away from each other
-    const V3 seam = ((lp + lx * (width / 2)) + (rp - rx * (width / 2))) * 0.5;
-    const double sag = radius * (1 - std::cos(phi / 2));
-    const V3 centre = seam + n * (sag * 2 / 3 + radius);   // on the flat monitors' plane, on average
-    const auto place = [&](double sign, double m[12]) {
-        const double a = sign * phi / 2;
-        const V3 z = n * std::cos(a) - t * std::sin(a);
-        const V3 p = centre - z * radius;
-        const V3 x = cross(up, z);
-        for (int i = 0; i < 3; ++i) {
-            m[i * 4 + 0] = x[i], m[i * 4 + 1] = up[i], m[i * 4 + 2] = z[i], m[i * 4 + 3] = p[i];
-        }
-    };
-    place(-1, out.left);
-    place(1, out.right);
-    out.radius = radius;
-    out.turn_deg = phi * 180 / M_PI;
-    out.sag_mm = sag * 1000;
-    return true;
-}

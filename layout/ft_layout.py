@@ -95,6 +95,10 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout hidden                   the screens hidden on their own
   ft-layout pin all|N left|right|head  pin screens to a wrist or your head as they are;
                                      unpin all|N
+  ft-layout align [start]            put the remote displays' panels on the physical monitors they stream,
+                                     from markers they show (docs/monitor-alignment.md); runs until they're
+                                     locked. Elsewhere: ft-layout align status | lock N|all | stop
+  ft-layout align join ID ID | unjoin  make two neighbouring displays one curved monitor after aligning
   ft-layout remote list              the remote displays, their numbers and their streams' state
   ft-layout remote monitors ADDRESS  the host's displays (Vibepollo's /api/display-devices, JSON)
   ft-layout remote add HOST ADDRESS APP [--size WxH] [--fps F] [--bitrate KBPS] [--label TEXT]
@@ -1663,6 +1667,9 @@ def main(argv):
             return main([argv[0], "use", name] if name in layout.get("layouts", {}) else [argv[0], "apply"])
         elif cmd == "remote":
             remote_command(argv[2:])
+        elif cmd == "align":
+            import ft_align  # only here: nothing else needs it
+            return ft_align.command(argv[2:])
         elif cmd in ("pin", "unpin") and len(argv) >= 3:
             log(screens_socket().ask(" ".join(argv[1:])))
             kwin_follow()  # pinned screens go last

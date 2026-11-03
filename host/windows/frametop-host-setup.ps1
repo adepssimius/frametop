@@ -292,13 +292,15 @@ function Main {
         Copy-Item (Join-Path $PSScriptRoot "align-markers.ps1") (Join-Path $Data "align-markers.ps1") -Force
         $appsFile = "$dir\config\apps.json"
         $apps = Get-Content -Raw $appsFile | ConvertFrom-Json
-        if (-not ($apps.apps | Where-Object { $_.name -eq "FrametopAlign" })) {
+        $alignCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Data "align-markers.ps1")`""
+        $alignApp = $apps.apps | Where-Object { $_.name -eq "FrametopAlign" }
+        if (-not $alignApp -or $alignApp.cmd -ne $alignCmd) {
             Stop-Vibepollo
             try {
                 # Vibepollo's own display and no display changes: the default turns the other monitors off.
-                $apps.apps = @($apps.apps) + [pscustomobject]@{
+                $apps.apps = @($apps.apps | Where-Object { $_.name -ne "FrametopAlign" }) + [pscustomobject]@{
                     "name" = "FrametopAlign"
-                    "cmd" = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Data "align-markers.ps1")`""
+                    "cmd" = $alignCmd
                     "display-output" = ""
                     "dd-configuration-option" = "disabled"
                 }

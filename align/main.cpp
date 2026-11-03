@@ -1,13 +1,16 @@
 // ft-align: finds the physical monitors from the AprilTags they show, and moves their panels onto them.
 // Frames come from ft-camd's ring, head poses from OpenVR, and panels move through ft-screens' socket.
 //
-//   ft-align run SPEC.json            live: JSON status lines on stdout; "lock N" and "quit" on stdin
+//   ft-align run SPEC.json            live: JSON status lines on stdout, with {"click": "lock"|"stop", "panel": N} when
+//                                     a monitor's panel is pressed; "lock N", "quit" and "hud N GOOD FIGURE|HINT" on stdin
 //   ft-align replay DIR SPEC.json     a capture (index.json, its PGM frames, poses.csv): prints each fit
 //
 // SPEC.json: {"displays": [{"panel": 103, "first_id": 0, "width_m": 0.7127, "height_m": 0.4009}]}. With "measure":
 // true those are a guess and the fit finds the real size. "tag" and "margin" override the marker layout, as
 // fractions of the height. docs/monitor-alignment.md has the rest.
 #include "../hands/camd/fhring.h"
+#include "../screens/overlaytex.h"
+#include "hud.h"
 #include "solver.h"
 
 #include <apriltag/apriltag.h>
@@ -30,6 +33,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -246,7 +250,7 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
     }
 
     vr::EVRInitError err = vr::VRInitError_None;
-    vr::IVRSystem *sys = vr::VR_Init(&err, vr::VRApplication_Background);
+    vr::IVRSystem *sys = vr::VR_Init(&err, vr::VRApplication_Overlay);
     if (!sys) {
         std::fprintf(stderr, "ft-align: SteamVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(err));
         return 1;
@@ -332,12 +336,36 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
             }
         });
 
+    std::vector<std::unique_ptr<Hud>> huds;
+    for (Live &l : live) huds.push_back(std::make_unique<Hud>(l.display.panel));
+    uint64_t hud_at = 0;
+
     Detector detector;
     std::vector<uint8_t> image;
     std::string input;
     bool done = false;
     int rc = 0;
     while (!done) {
+        // Each monitor's panel follows its fit, and says when it's pressed.
+        if (now_ns() - hud_at > 50000000) {
+            hud_at = now_ns();
+            for (size_t i = 0; i < live.size(); ++i) {
+                Live &l = live[i];
+                Fit fit;
+                bool have;
+                {
+                    std::lock_guard<std::mutex> g(l.mu);
+                    fit = l.fit, have = l.have_fit;
+                }
+                if (l.locked) huds[i]->hide();
+                else if (have && fit.shown_mm < kPlaceBelowMm) huds[i]->place(fit.pose, fit.height_m);
+                if (const Hud::Click click = huds[i]->poll(); click != Hud::None && !l.locked) {
+                    std::lock_guard<std::mutex> g(out_mu);
+                    std::printf("{\"click\": \"%s\", \"panel\": %d}\n", click == Hud::Lock ? "lock" : "stop", l.display.panel);
+                    std::fflush(stdout);
+                }
+            }
+        }
         // Commands: lock N, quit. End of input means quit.
         pollfd pfd{0, POLLIN, 0};
         if (poll(&pfd, 1, 0) > 0) {
@@ -349,8 +377,15 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
                 input.append(buf, size_t(n));
                 for (size_t at; (at = input.find('\n')) != std::string::npos; input.erase(0, at + 1)) {
                     const std::string line = input.substr(0, at);
-                    int panel;
+                    int panel, good, used = 0;
                     if (line == "quit") done = true;
+                    else if (std::sscanf(line.c_str(), "hud %d %d %n", &panel, &good, &used) == 2 && used) {
+                        const std::string words = line.substr(size_t(used));
+                        const size_t bar = words.find('|');
+                        for (size_t i = 0; i < live.size(); ++i)
+                            if (live[i].display.panel == panel && bar != std::string::npos)
+                                huds[i]->set_text(good, words.substr(0, bar), words.substr(bar + 1));
+                    }
                     else if (std::sscanf(line.c_str(), "lock %d", &panel) == 1)
                         for (Live &l : live)
                             if (l.display.panel == panel) {
@@ -400,6 +435,8 @@ int run(const std::vector<Display> &displays, const std::map<std::string, Camera
     stop = true;
     for (std::thread &t : fitters) t.join();
     sampler.join();
+    huds.clear();
+    overlaytex::Shutdown();
     vr::VR_Shutdown();
     return rc;
 }

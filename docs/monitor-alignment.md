@@ -4,7 +4,7 @@ Puts each remote display's panel on top of the physical monitor it streams, so a
 
 ## Using it
 
-Open **Align to My Monitors** from the menu, or press Meta+Shift+A, or choose **Align to my monitors** on the Layout & profiles page of Frametop Display Settings. Each monitor shows markers and the panels move onto them as you move your head. Each one locks by itself once its figure has stayed under 5 mm for 3 seconds, and its stream comes back. Open the entry again to stop early. It stops by itself after 5 minutes. Check **Join … into one curved monitor** in Display Settings first to make two neighbouring monitors one curved monitor.
+Open **Align to My Monitors** from the menu, or press Meta+Shift+A, or choose **Align to my monitors** on the Layout & profiles page of Frametop Display Settings. Each monitor shows markers and the panels move onto them as you move your head. Each one shows its figure, a hint, and **Lock** and **Stop** buttons in the gap between its markers, and locks by itself once its figure has stayed under 5 mm for 3 seconds, and its stream comes back. Open the entry again to stop early. It stops by itself after 5 minutes. To make monitors one curved monitor, put them in the same group under **Curved monitors** in Display Settings first.
 
 `ft-layout align` does the same from a terminal, and `ft-layout align status | lock N|all | stop` control it.
 
@@ -18,7 +18,8 @@ It needs ft-camd's capabilities once (`hands/run.sh caps`, which asks for the pa
 2. The app shows four AprilTags (36h11) on the real monitor. They're placed as fractions of the screen, so resolution and scaling don't matter. `host/macos/align-markers.js`, `host/windows/align-markers.ps1` and `align/solver.cpp` must agree on the layout.
 3. `align/build/ft-align` reads the side tracking cameras from ft-camd's ring and the head's pose from OpenVR, and finds the tags with the `apriltag` library. Each tag's ID says which monitor it's on, so a frame can feed several monitors at once.
 4. A thread per display fits that monitor's pose in the standing universe, at most 4 times a second and only when it has something new, and moves its panel with `pose N matrix`. The first time, the fit also measures the monitor's size, which is kept in `frametop-layout.json` as `physical` once the fit is good enough.
-5. A display's stream comes back when it's locked. Everything comes back if anything fails.
+5. ft-align also puts a small panel of its own on each monitor once the fit is within 10 cm (`align/hud.cpp`). It exists only in VR, so the cameras never see it. `ft_align.py` gives it its text, and it reports presses back as JSON.
+6. A display's stream comes back when it's locked. Everything comes back if anything fails.
 
 `layout/ft_align.py` runs all of this. `layout/ft-layout align` is its command line, and Display Settings talks to it on the abstract socket `@ft_align`.
 
@@ -34,9 +35,13 @@ It needs ft-camd's capabilities once (`hands/run.sh caps`, which asks for the pa
 
 Windows monitors are matched to panels through Vibepollo's monitor list (`ft-layout remote monitors`): a panel's `display:{id}` gives its `\\.\DISPLAYn`. A monitor that isn't active on the computer fails with a message saying so. Virtual displays are skipped, because they have no physical monitor.
 
-## Joining two monitors
+A host's server can crash partway through. Sunshine ends itself with `Fatal: Hang detected!` when a client's stream never connects, and it comes back through launchd, but the marker app it started stays on top of the monitor. So each start of the marker app closes any earlier one, and the app ends itself after 6 minutes.
 
-A join makes two equal panels arcs of one cylinder, tangent at the seam (`join_panels` in `layout/ft_align.py`). The default radius keeps the turn the two panels already have between them, so they go on facing as the real monitors do: 19 degrees across two 31.5-inch monitors came to 2.15 m. The seam closes, so the panels no longer sit exactly over their monitors, and the bezels are gone. `align_join_radius` in the layout overrides the radius.
+## Curved groups
+
+Each display can be given a group (`align_group` in the layout; `ft-layout align group N ID...`). When a run ends, the aligned displays in a group become arcs of one cylinder, each tangent to the next (`curve_group` in `layout/ft_align.py`). The order comes from where the monitors were measured, so it doesn't have to be chosen, and they can be different widths. Their centres end up at one height, though, so monitors at different heights stop lining up with the real ones.
+
+The default radius keeps the turn from one end of the group to the other, so the outer panels go on facing as the real monitors do: 19 degrees between two 31.5-inch monitors came to 2.15 m. The seams close, so panels no longer sit exactly over their monitors, and the bezels are gone. `align_group_radius` in the layout overrides the radius. Monitors that face away from each other, or are parallel without a radius, stay as they are, and the log says why.
 
 ## What the tests found
 
@@ -60,5 +65,4 @@ On a Steam Frame, with a Mac and a Windows PC, in November 2026:
 - Offering a realign when the room coordinates move.
 - Anchoring panels to SteamVR's saved room map, which might mean realigning far less often.
 - The Arcturus cameras (`ft-camd --with-color`), which might reduce the movement needed. Frametop's notes call them unreliable when worn.
-- Panels of different widths in a join.
 - An arrangement of its own in the Arrangement list, so a profile can remember these displays.

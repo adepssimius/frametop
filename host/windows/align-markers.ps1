@@ -30,6 +30,10 @@ function Draw-Screen($g, $w, $h, $firstId) {
     }
 }
 
+# A Vibepollo that crashes leaves its app behind, on top of the monitors, so close any earlier markers.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' AND CommandLine LIKE '%align-markers.ps1%'" |
+    Where-Object { $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
 foreach ($s in [Windows.Forms.Screen]::AllScreens) {
     if ($s.DeviceName -notmatch 'DISPLAY(\d+)$') { continue }
     $firstId = ([int]$Matches[1] - 1) * 4
@@ -48,7 +52,7 @@ foreach ($s in [Windows.Forms.Screen]::AllScreens) {
     $f.Show(); $f.Bounds = $s.Bounds
 }
 $t = New-Object Windows.Forms.Timer
-$t.Interval = 600000     # a last resort: Vibepollo ends it
+$t.Interval = 360000     # a last resort: Vibepollo ends it
 $t.Add_Tick({ [Windows.Forms.Application]::Exit() })
 $t.Start()
 [Windows.Forms.Application]::Run()

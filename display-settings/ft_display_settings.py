@@ -37,7 +37,7 @@ import sys
 import time
 import threading
 
-from PySide6.QtCore import Property, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import Property, QIODevice, QObject, QProcess, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
@@ -45,13 +45,14 @@ from PySide6.QtQuickControls2 import QQuickStyle
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYOUT_DIR = os.path.join(HERE, "..", "layout")
 sys.path.insert(0, LAYOUT_DIR)
-import ft_align  # noqa: E402  (its joins; the alignment itself runs on the host, through ft-layout)
+import ft_align  # noqa: E402  (its groups; the alignment itself runs on the host, through ft-layout)
 import ft_layout  # noqa: E402  (pure Python: the same geometry ft-layout uses)
 import steam_settings  # noqa: E402
 
 FT_LAYOUT = os.path.join(LAYOUT_DIR, "ft-layout")
 DESKTOPS = os.path.join(HERE, "..", "desktops.sh")
 CONF_PATH = ft_layout.CONF_PATH
+ALIGN_LOG = f"/run/user/{os.getuid()}/frametop-align.log"   # what the Align button's ft-layout printed
 # gamescope's VR backend uploads a texture the size of a screen at start, through a
 # 1920x1080x4-byte buffer: more pixels than 1920x1080 abort it (see the design notes).
 MAX_PIXELS = 1920 * 1080
@@ -103,6 +104,17 @@ def host_command(*cmd):
         return list(cmd)
     bus = f"unix:path=/run/user/{os.getuid()}/bus"
     return ["env", f"DBUS_SESSION_BUS_ADDRESS={bus}", "distrobox-host-exec"] + list(cmd)
+
+
+def align_log_end():
+    """Why the Align button's ft-layout stopped: its last line, without the prefix ft-layout gives errors."""
+    try:
+        with open(ALIGN_LOG) as f:
+            lines = f.read().split("\n")
+    except OSError:
+        lines = []
+    lines = [line for line in lines if line.strip()]
+    return lines[-1].removeprefix("error: ") if lines else "no cause is available"
 
 
 class Backend(QObject):
@@ -777,17 +789,26 @@ class Backend(QObject):
         return getattr(self, "_align", None) or {}
 
     @Property("QVariantList", notify=changed)
-    def alignJoins(self):
-        return ft_align.join_choices(ft_layout.load_layout())
+    def alignGroups(self):
+        return ft_align.group_choices(ft_layout.load_layout())
 
-    @Slot(str, str, bool)
-    def setAlignJoin(self, a, b, on):
-        self._edit_layout(lambda l: ft_align.set_join(l, a, b, on))
+    @Slot(str, int)
+    def setAlignGroup(self, display_id, group):
+        self._edit_layout(lambda l: ft_align.set_group(l, display_id, group))
 
     @Slot()
     def alignStart(self):
         argv = host_command(os.path.abspath(FT_LAYOUT), "align", "start")
-        if not QProcess.startDetached(argv[0], argv[1:]):
+        try:
+            os.unlink(ALIGN_LOG)
+        except OSError:
+            pass
+        process = QProcess()
+        process.setProgram(argv[0])
+        process.setArguments(argv[1:])
+        process.setStandardOutputFile(ALIGN_LOG, QIODevice.OpenModeFlag.Append)
+        process.setStandardErrorFile(ALIGN_LOG, QIODevice.OpenModeFlag.Append)
+        if not process.startDetached():
             return self.message.emit("Couldn't start alignment", True)
         self._align = {"state": "starting", "displays": []}
         self._watch_align()
@@ -816,7 +837,7 @@ class Backend(QObject):
             elif last.get("state") in ("done", "finishing"):
                 self.message.emit("Alignment: done", False)
             else:
-                self.message.emit("Alignment didn't start: see ft-layout's log", True)
+                self.message.emit(f"Alignment did not start: {align_log_end()}", True)
             return
         self.alignChanged.emit()
 

@@ -1,4 +1,4 @@
-"""The geometry of joining two panels, and which tags a display shows. Run from the repo: python3 -m unittest layout/tests/test_ft_align.py"""
+"""The geometry of curving panels into one, and which tags a display shows. Run from the repo: python3 -m unittest layout/tests/test_ft_align.py"""
 import math
 import os
 import sys
@@ -18,9 +18,9 @@ def panel(x, turn_deg):
             -math.sin(a), 0, math.cos(a), -1.0]
 
 
-def edge(m, radius, side):
+def edge(m, width, radius, side):
     """A curved panel's edge (side +1 right, -1 left) and the surface's direction there."""
-    a = side * WIDTH / (2 * radius)
+    a = side * width / (2 * radius)
     point, along = [], []
     for i in range(3):
         point.append(m[i * 4 + 3] + m[i * 4] * radius * math.sin(a) + m[i * 4 + 2] * radius * (1 - math.cos(a)))
@@ -28,36 +28,59 @@ def edge(m, radius, side):
     return point, along
 
 
-class Join(unittest.TestCase):
+class Curve(unittest.TestCase):
     def setUp(self):
         self.left, self.right = panel(-0.37, 9.5), panel(0.37, -9.5)
 
-    def test_seam_closes_and_is_tangent(self):
-        left, right, radius, _, _ = ft_align.join_panels(self.left, self.right, WIDTH)
-        a, along_a = edge(left, radius, 1)
-        b, along_b = edge(right, radius, -1)
-        self.assertLess(math.dist(a, b), 1e-6)
+    def assert_seam(self, a, b, width_a, width_b, radius):
+        pa, along_a = edge(a, width_a, radius, 1)
+        pb, along_b = edge(b, width_b, radius, -1)
+        self.assertLess(math.dist(pa, pb), 1e-6)
         self.assertGreater(sum(x * y for x, y in zip(along_a, along_b)), 0.999999)
 
+    def test_two_panels_close_and_are_tangent(self):
+        (left, right), radius, _ = ft_align.curve_group([self.left, self.right], [WIDTH, WIDTH])
+        self.assert_seam(left, right, WIDTH, WIDTH, radius)
+
     def test_default_keeps_the_panels_turn(self):
-        _, _, radius, turn, sag = ft_align.join_panels(self.left, self.right, WIDTH)
-        self.assertAlmostEqual(turn, 19, places=3)
+        _, radius, turn = ft_align.curve_group([self.left, self.right], [WIDTH, WIDTH])
         self.assertAlmostEqual(radius, WIDTH / math.radians(19), places=3)
-        self.assertAlmostEqual(sag, radius * (1 - math.cos(math.radians(9.5))), places=6)
+        self.assertAlmostEqual(turn, 38, places=3)
 
     def test_takes_a_chosen_radius(self):
-        _, _, radius, _, _ = ft_align.join_panels(self.left, self.right, WIDTH, 1.2)
+        _, radius, _ = ft_align.curve_group([self.left, self.right], [WIDTH, WIDTH], 1.2)
         self.assertEqual(radius, 1.2)
 
-    def test_refuses_panels_the_wrong_way_round(self):
+    def test_three_panels_of_different_widths_in_any_order(self):
+        given = [panel(0.75, -20), panel(-0.65, 20), panel(0, 0)]    # right, left, middle
+        widths = [0.6, 0.71, 0.5]
+        (right, left, middle), radius, _ = ft_align.curve_group(given, widths)
+        self.assert_seam(left, middle, 0.71, 0.5, radius)
+        self.assert_seam(middle, right, 0.5, 0.6, radius)
+        self.assertLess(left[3], middle[3])
+        self.assertLess(middle[3], right[3])
+
+    def test_stays_on_the_monitors(self):
+        # Three real monitors edge to edge, the outer two turned 19 degrees in, so they come forward too.
+        a = math.radians(19)
+        off, forward = WIDTH / 2 * (1 + math.cos(a)), WIDTH / 2 * math.sin(a)
+        left, right = panel(-off, 19), panel(off, -19)
+        left[11] += forward
+        right[11] += forward
+        given = [left, panel(0, 0), right]
+        placed, _, _ = ft_align.curve_group(given, [WIDTH] * 3)
+        for real, curved in zip(given, placed):
+            self.assertLess(math.dist([real[3], real[7], real[11]], [curved[3], curved[7], curved[11]]), 0.03)
+
+    def test_refuses_panels_facing_away(self):
         with self.assertRaises(ValueError):
-            ft_align.join_panels(self.right, self.left, WIDTH)
+            ft_align.curve_group([panel(-0.37, -9.5), panel(0.37, 9.5)], [WIDTH, WIDTH])
 
     def test_parallel_panels_need_a_radius(self):
-        flat = panel(-0.37, 0), panel(0.37, 0)
+        flat = [panel(-0.37, 0), panel(0.37, 0)]
         with self.assertRaises(ValueError):
-            ft_align.join_panels(*flat, WIDTH)
-        ft_align.join_panels(*flat, WIDTH, 2.0)
+            ft_align.curve_group(flat, [WIDTH, WIDTH])
+        ft_align.curve_group(flat, [WIDTH, WIDTH], 2.0)
 
 
 class Tags(unittest.TestCase):
@@ -130,23 +153,37 @@ class Locking(unittest.TestCase):
         self.assertTrue(a.update(dict(self.good, width_m=0.7005), 16.2))
 
 
+class HudLine(unittest.TestCase):
+    def test_a_good_figure(self):
+        self.assertEqual(ft_align.hud_line(102, {"shown_mm": 3.2}), "hud 102 1 About 3 mm|Position is good")
+
+    def test_says_what_would_help(self):
+        line = ft_align.hud_line(103, {"shown_mm": 40, "range_mm": [500, 20, 0], "distance_m": 0.6})
+        self.assertEqual(line, "hud 103 0 About 40 mm|Move up and down")
+
+
 class Choices(unittest.TestCase):
     def setUp(self):
         self.layout = {"hosts": [{"name": "m", "address": "1", "displays": [{"id": "a", "app": "Desktop"}, {"id": "b", "app": "Desktop"}, {"id": "c", "app": "Desktop", "off": True}]}]}
 
-    def test_neighbours_can_join(self):
-        self.assertEqual([(c["a"], c["b"], c["joined"]) for c in ft_align.join_choices(self.layout)], [("a", "b", False)])
+    def test_lists_a_computers_connected_displays(self):
+        [choice] = ft_align.group_choices(self.layout)
+        self.assertEqual(choice["groups"], 1)
+        self.assertEqual([(d["id"], d["group"]) for d in choice["displays"]], [("a", 0), ("b", 0)])
 
-    def test_a_join_can_be_set_and_cleared(self):
-        ft_align.set_join(self.layout, "a", "b", True)
-        self.assertTrue(ft_align.join_choices(self.layout)[0]["joined"])
-        ft_align.set_join(self.layout, "a", "b", False)
-        self.assertFalse(ft_align.join_choices(self.layout)[0]["joined"])
+    def test_a_group_can_be_set_and_cleared(self):
+        ft_align.set_group(self.layout, "b", 1)
+        self.assertEqual(ft_align.group_choices(self.layout)[0]["displays"][1]["group"], 1)
+        ft_align.set_group(self.layout, "b", 0)
+        self.assertEqual(ft_align.group_choices(self.layout)[0]["displays"][1]["group"], 0)
 
-    def test_a_display_joins_only_once(self):
-        ft_align.set_join(self.layout, "a", "b", True)
-        ft_align.set_join(self.layout, "b", "c", True)
-        self.assertEqual(self.layout["align_joins"], [["b", "c"]])
+    def test_an_unknown_display_is_an_error(self):
+        with self.assertRaises(RuntimeError):
+            ft_align.set_group(self.layout, "nope", 1)
+
+    def test_one_display_has_nothing_to_group_with(self):
+        self.layout["hosts"][0]["displays"][1]["off"] = True
+        self.assertEqual(ft_align.group_choices(self.layout), [])
 
 
 if __name__ == "__main__":

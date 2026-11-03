@@ -6,7 +6,7 @@ align/build/ft-align finds them and moves the panels live, and a display goes ba
 locked. A session is one run of this; positions aren't saved, because SteamVR's room coordinates can move
 between sessions. Sizes are: a monitor measured once needs no measuring again.
 
-Stand-alone geometry (join) needs nothing but the standard library, so tests can run it anywhere.
+Stand-alone geometry (curve_group) needs nothing but the standard library, so tests can run it anywhere.
 """
 import json
 import math
@@ -39,41 +39,48 @@ WIDTH_STEADY_M = 0.002       # ...and its width has to stay within this over the
 LIVE_WAIT_S = 30
 
 
-def join_panels(left, right, width, radius=0):
-    """Two equal panels as arcs of one cylinder, tangent at the seam: (left pose, right pose, radius, turn in
-    degrees, depth of the curve in metres). Poses are 12 numbers, row by row. radius 0 keeps the turn the
-    panels already have between them, so they go on facing as the real monitors do."""
+def curve_group(poses, widths, radius=0):
+    """Panels as arcs of one cylinder, each tangent to the next, in the order they sit along their own x axes:
+    (their poses, in the order given, the radius, and the whole curve's turn in degrees). Poses are 12 numbers,
+    row by row. radius 0 keeps the turn the panels already have from end to end, so the outer ones go on facing
+    as the real monitors do. The curve stays on the real monitors, on average."""
     col = lambda m, c: [m[c], m[4 + c], m[8 + c]]
     dot = lambda a, b: sum(x * y for x, y in zip(a, b))
     add = lambda a, b, s=1.0: [x + s * y for x, y in zip(a, b)]
     unit = lambda a: [x / math.sqrt(dot(a, a)) for x in a]
     cross = lambda a, b: [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-    up = unit(add(col(left, 1), col(right, 1)))
+    total = lambda vectors: [sum(v[i] for v in vectors) for i in range(3)]
+    up = unit(total([col(m, 1) for m in poses]))
     flat = lambda v: unit(add(v, up, -dot(v, up)))
-    nl, nr = flat(col(left, 2)), flat(col(right, 2))
-    measured = math.acos(max(-1.0, min(1.0, dot(nl, nr))))
+    along = flat(total([col(m, 0) for m in poses]))
+    order = sorted(range(len(poses)), key=lambda i: dot(col(poses[i], 3), along))
+    normals = [flat(col(poses[i], 2)) for i in order]
+    # Toward each other is positive: the monitors bow around the viewer.
+    measured = sum(-math.atan2(dot(cross(a, b), up), dot(a, b)) for a, b in zip(normals, normals[1:]))
     if radius <= 0:
-        if measured < 1e-3:
+        if abs(measured) < 1e-3:
             raise ValueError("these panels are parallel, so give a radius")
-        radius = width / measured
-    phi = width / radius
-    n = unit(add(nl, nr))
+        if measured < 0:
+            raise ValueError("these panels are facing away from each other")
+        centres = [(widths[a] + widths[b]) / 2 for a, b in zip(order, order[1:])]
+        radius = sum(centres) / measured
+    length = sum(widths)
+    half = length / (2 * radius)
+    n = flat(total([[x * widths[i] for x in col(poses[i], 2)] for i in range(len(poses))]))
     t = cross(up, n)
-    lp, rp = col(left, 3), col(right, 3)
-    if dot(t, add(rp, lp, -1)) <= 0:
-        raise ValueError("these panels are the wrong way round, or facing away from each other")
-    seam = [(a + b) / 2 for a, b in zip(add(lp, col(left, 0), width / 2), add(rp, col(right, 0), -width / 2))]
-    sag = radius * (1 - math.cos(phi / 2))
-    centre = add(seam, n, sag * 2 / 3 + radius)   # on the flat monitors' plane, on average
-
-    def place(sign):
-        a = sign * phi / 2
+    real = [sum(widths[i] * poses[i][r * 4 + 3] for i in range(len(poses))) / length for r in range(3)]
+    middle = add(real, n, -radius * (1 - math.sin(half) / half))    # the middle of the arc: its mean surface is on real
+    centre = add(middle, n, radius)
+    placed = [None] * len(poses)
+    start = -length / 2
+    for i in order:
+        a = (start + widths[i] / 2) / radius
+        start += widths[i]
         z = add([x * math.cos(a) for x in n], t, -math.sin(a))
         x = cross(up, z)
         p = add(centre, z, -radius)
-        return [v for i in range(3) for v in (x[i], up[i], z[i], p[i])]
-
-    return place(-1), place(1), radius, math.degrees(phi), sag
+        placed[i] = [v for r in range(3) for v in (x[r], up[r], z[r], p[r])]
+    return placed, radius, math.degrees(2 * half)
 
 
 def first_tag(display, index):
@@ -115,17 +122,23 @@ def spec_entry(number, display, first_id):
 def hint(fit):
     """What would help this display most: the same advice for every head."""
     if "shown_mm" not in fit:
-        return "Look toward this display"
+        return "Look at this display"
     if fit["shown_mm"] < READY_BELOW_MM:
-        return "Good: it locks by itself in a moment"
+        return "Position is good"
     x, y, _ = fit.get("range_mm", [0, 0, 0])
     if fit.get("distance_m", 0) > 0.95:
-        return "Lean closer"
+        return "Move closer"
     if y < 150:
         return "Move up and down"
     if x < 200:
         return "Move side to side"
-    return "Keep moving slowly"
+    return "Continue to move slowly"
+
+
+def hud_line(number, fit):
+    """What a monitor's own panel says, for ft-align."""
+    good = fit["shown_mm"] < READY_BELOW_MM
+    return f"hud {number} {int(good)} About {round(fit['shown_mm'])} mm|{hint(fit)}"
 
 
 class AutoLock:
@@ -163,6 +176,7 @@ class Session:
         self.locked, self.restored = set(), set()
         self.camd = self.align = None
         self.finish = threading.Event()
+        self.send_mu = threading.Lock()     # lock, from the socket's thread and read_fits, and the panels' text
         # Windows: one server carries every display and one app shows every monitor's markers, so one panel
         # starts it, and the others stay live until it ends. A Mac's displays each have their own server and app.
         self.shared = any(d["app"].startswith("display:") for _, d in displays)
@@ -215,8 +229,13 @@ class Session:
                 fit = json.loads(line)
             except ValueError:
                 continue
-            with self.mu:
-                self.fits[fit["panel"]] = fit
+            if fit.get("click") == "lock":
+                self.lock(fit["panel"])
+            elif fit.get("click") == "stop":
+                self.finish.set()
+            else:
+                with self.mu:
+                    self.fits[fit["panel"]] = fit
         self.finish.set()       # ft-align ends when every display is locked, or if it fails
 
     def run(self):
@@ -252,12 +271,27 @@ class Session:
         with self.mu:
             self.state = "aligning"
         locks = {n: AutoLock(not d.get("physical")) for n, d in self.displays}
+        said = {}
         end = time.time() + TIME_LIMIT_S
         while time.time() < end and not self.finish.wait(0.25):
             with self.mu:
                 ready = [n for n, fit in self.fits.items() if n not in self.locked and locks[n].update(fit, time.time())]
             for number in ready:
                 self.lock(number)
+            with self.mu:
+                lines = {n: hud_line(n, fit) for n, fit in self.fits.items() if "shown_mm" in fit and n not in self.locked}
+            for number, line in lines.items():
+                if said.get(number) != line:
+                    said[number] = line
+                    self.send(line)
+
+    def send(self, line):
+        with self.send_mu:
+            try:
+                self.align.stdin.write(line + "\n")
+                self.align.stdin.flush()
+            except (OSError, ValueError):
+                pass    # it has gone: read_fits ends the run
 
     def lock(self, number):
         """Freezes a display where it is, and gives it its stream back."""
@@ -266,8 +300,7 @@ class Session:
             if number in self.locked or "shown_mm" not in fit or self.state != "aligning":
                 return False
             self.locked.add(number)
-        self.align.stdin.write(f"lock {number}\n")
-        self.align.stdin.flush()
+        self.send(f"lock {number}")
         if not self.shared:     # one app shows them all: the streams change back once, at the end
             threading.Thread(target=self.restore, args=(number,), daemon=True).start()
         return True
@@ -296,31 +329,28 @@ class Session:
         if changed:
             ft_layout.save_layout(layout)
 
-    def apply_joins(self):
+    def apply_groups(self):
         layout = ft_layout.load_layout()
-        ids = {d["id"]: n for n, d in self.displays}
-        for a, b in layout.get("align_joins", []):
-            if a not in ids or b not in ids:
+        groups = {}
+        wanted = {d["id"]: d.get("align_group") for _, _, d in ft_layout.remote_displays(layout)}
+        for number, display in self.displays:
+            if wanted.get(display["id"]) and "matrix" in (self.fits.get(number) or {}):
+                groups.setdefault(wanted[display["id"]], []).append(number)
+        for group, numbers in sorted(groups.items()):
+            if len(numbers) < 2:
                 continue
-            na, nb = ids[a], ids[b]
-            fa, fb = self.fits.get(na) or {}, self.fits.get(nb) or {}
-            if "matrix" not in fa or "matrix" not in fb:
-                continue
-            along = [fb["matrix"][i * 4 + 3] - fa["matrix"][i * 4 + 3] for i in range(3)]
-            first_is_left = sum(fa["matrix"][i * 4] * along[i] for i in range(3)) > 0
-            nl, nr = (na, nb) if first_is_left else (nb, na)
-            fl, fr = (fa, fb) if first_is_left else (fb, fa)
-            width = (fl["width_m"] + fr["width_m"]) / 2
+            fits = [self.fits[n] for n in numbers]
+            widths = [f["width_m"] for f in fits]
             try:
-                left, right, radius, turn, sag = join_panels(fl["matrix"], fr["matrix"], width, float(layout.get("align_join_radius", 0)))
+                poses, radius, turn = curve_group([f["matrix"] for f in fits], widths, float(layout.get("align_group_radius", 0)))
             except ValueError as e:
-                ft_layout.log(f"alignment: can't join {a} and {b}: {e}")
+                ft_layout.log(f"alignment: can't curve group {group}: {e}")
                 continue
-            for number, pose in ((nl, left), (nr, right)):
+            for number, width, pose in zip(numbers, widths, poses):
                 self.sock.ask(f"width {number} {width:.4f}")
                 self.sock.ask(f"curve {number} {radius:.4f}")
                 self.sock.ask(f"pose {number} " + " ".join(f"{v:.5f}" for v in pose))
-            ft_layout.log(f"alignment: joined {a} and {b}: radius {radius:.2f} m, {turn:.1f} degrees across each")
+            ft_layout.log(f"alignment: curved group {group}: {len(numbers)} displays, radius {radius:.2f} m, {turn:.1f} degrees in all")
 
     def close(self):
         """Whatever happened, every display gets its stream back and nothing is left running."""
@@ -348,7 +378,7 @@ class Session:
             self.camd.terminate()
         if self.state != "failed":
             self.keep_sizes()
-            self.apply_joins()
+            self.apply_groups()
             with self.mu:
                 self.state = "done"
 
@@ -377,23 +407,27 @@ def choose(layout, host_name):
     return next(iter(groups.values()))
 
 
-def join_choices(layout):
-    """The displays that could join, neighbours in the list: [{a, b, label, joined}]."""
-    joins = [set(j) for j in layout.get("align_joins", [])]
-    out = []
-    last = None
+def group_choices(layout):
+    """Per computer with at least two connected displays: [{host, groups, displays: [{id, label, group}]}]. group 0
+    is on its own. A group takes at least two, so that's how many groups a computer's displays can make."""
+    hosts = {}
     for _, host, d in ft_layout.remote_displays(layout):
-        if last and last[0] is host and not d.get("off") and not last[1].get("off"):
-            a, b = last[1], d
-            out.append({"a": a["id"], "b": b["id"], "joined": {a["id"], b["id"]} in joins,
-                        "label": f"{a.get('label') or a['id']} and {d.get('label') or d['id']}"})
-        last = (host, d)
-    return out
+        if not d.get("off"):
+            hosts.setdefault(host["name"], []).append({"id": d["id"], "label": d.get("label") or d["id"],
+                                                       "group": d.get("align_group", 0)})
+    return [{"host": name, "groups": len(displays) // 2, "displays": displays}
+            for name, displays in hosts.items() if len(displays) >= 2]
 
 
-def set_join(layout, a, b, on):
-    joins = [j for j in layout.get("align_joins", []) if not set(j) & {a, b}]
-    layout["align_joins"] = joins + ([[a, b]] if on else [])
+def set_group(layout, display_id, group):
+    for _, _, d in ft_layout.remote_displays(layout):
+        if d["id"] == display_id:
+            if group:
+                d["align_group"] = group
+            else:
+                d.pop("align_group", None)
+            return
+    raise RuntimeError(f"no display called {display_id}")
 
 
 def serve(session):
@@ -476,7 +510,7 @@ def start(host_name=None):
 
 
 def command(args):
-    """ft-layout align [start [--host NAME]] | toggle | status | lock N|all | stop | join ID ID | unjoin"""
+    """ft-layout align [start [--host NAME]] | toggle | status | lock N|all | stop | group N ID...  (N 0: on its own)"""
     what = args[0] if args else "start"
     if what == "start":
         return start(args[args.index("--host") + 1] if "--host" in args else None)
@@ -492,13 +526,10 @@ def command(args):
         print(json.dumps(ask("lock " + args[1])))
     elif what == "stop":
         print(json.dumps(ask("stop")))
-    elif what == "join" and len(args) == 3:
+    elif what == "group" and len(args) >= 3 and args[1].isdigit():
         layout = ft_layout.load_layout()
-        set_join(layout, args[1], args[2], True)
-        ft_layout.save_layout(layout)
-    elif what == "unjoin":
-        layout = ft_layout.load_layout()
-        layout.pop("align_joins", None)
+        for display_id in args[2:]:
+            set_group(layout, display_id, int(args[1]))
         ft_layout.save_layout(layout)
     else:
         raise RuntimeError(command.__doc__)

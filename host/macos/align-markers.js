@@ -57,7 +57,7 @@ function draw(width, height, firstId) {
 }
 
 function run(argv) {
-  const [key, firstId, seconds] = [argv[0], Number(argv[1]), Number(argv[2] || 600)];
+  const [key, firstId, seconds] = [argv[0], Number(argv[1]), Number(argv[2] || 360)];
   if (firstId + 4 > CODES.length) throw new Error('no tags for first id ' + firstId);
   $.NSApplication.sharedApplication.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
   const screen = screenWithKey(key);

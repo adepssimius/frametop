@@ -490,12 +490,12 @@ Kirigami.ApplicationWindow {
                             level: 3
                             text: backend.alignStatus.state === "failed" ? "Alignment failed"
                                 : backend.alignStatus.state === "aligning" ? "Aligning " + backend.alignStatus.host
-                                : backend.alignStatus.state === "starting" ? "Starting: the displays are switching to markers"
-                                : "Finishing: the displays are going back to their streams"
+                                : backend.alignStatus.state === "starting" ? "Starting alignment"
+                                : "Completing alignment"
                         }
                         Controls.Label {
                             visible: backend.alignStatus.state === "aligning"
-                            text: "Move your head slowly: a sweep across your desk, some up and down. Each panel moves to its monitor. Lock each one when it looks right."
+                            text: "Move your head slowly from side to side and up and down. Each monitor locks when its position is correct. To lock or stop before this, use the buttons on the monitor."
                             wrapMode: Text.Wrap
                             Layout.fillWidth: true
                         }
@@ -532,17 +532,48 @@ Kirigami.ApplicationWindow {
                     }
                 }
 
-                // Two neighbouring monitors as one curved monitor, after aligning.
+                // Monitors in a line as one curved monitor, after aligning.
                 ColumnLayout {
                     Layout.fillWidth: true
-                    visible: backend.alignJoins.length > 0
+                    visible: backend.alignGroups.length > 0
+                    Kirigami.Heading {
+                        level: 3
+                        text: "Curved monitors"
+                    }
+                    Controls.Label {
+                        text: "Monitors in the same group become one curved monitor when you align them, in the order they sit on your desk."
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                    }
                     Repeater {
-                        model: backend.alignJoins
-                        delegate: Controls.CheckBox {
+                        model: backend.alignGroups
+                        delegate: ColumnLayout {
                             required property var modelData
-                            text: "Join " + modelData.label + " into one curved monitor when aligning"
-                            checked: modelData.joined
-                            onToggled: backend.setAlignJoin(modelData.a, modelData.b, checked)
+                            readonly property var computer: modelData
+                            Layout.fillWidth: true
+                            Controls.Label {
+                                visible: backend.alignGroups.length > 1
+                                text: computer.host
+                                font.bold: true
+                            }
+                            Repeater {
+                                model: computer.displays
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    Controls.Label { text: modelData.label; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Controls.ComboBox {
+                                        model: {
+                                            const names = ["On its own"]
+                                            for (let g = 1; g <= computer.groups; ++g)
+                                                names.push(computer.groups > 1 ? "Curved group " + g : "Curved group")
+                                            return names
+                                        }
+                                        currentIndex: Math.min(modelData.group, computer.groups)
+                                        onActivated: index => backend.setAlignGroup(modelData.id, index)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
